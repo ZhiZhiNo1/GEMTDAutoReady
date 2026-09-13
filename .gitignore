@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.buildenv/
+.venv/
+build/
+dist/
+*.spec
+.codewhale/

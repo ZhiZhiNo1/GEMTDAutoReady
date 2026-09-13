@@ -68,6 +68,30 @@ def activate_window(win):
         # 即使置顶失败，也不让它崩溃，继续跑
         print(f"⚠️ 窗口置顶失败: {e}")
 
+def set_window_topmost(win, enable):
+    """设置窗口置顶状态
+    enable=True: 置顶
+    enable=False: 取消置顶
+    """
+    if not win:
+        return
+    try:
+        if win.isMinimized():
+            win.restore()
+            time.sleep(0.2)
+        
+        # 根据参数选择置顶标志
+        flag = win32con.HWND_TOPMOST if enable else win32con.HWND_NOTOPMOST
+        
+        win32gui.SetWindowPos(
+            win.hwnd, 
+            flag, 
+            0, 0, 0, 0, 
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
+        )
+    except Exception as e:
+        print(f"⚠️ 设置窗口置顶状态失败: {e}")        
+
 def find_dota_window():
     """
     通过进程名 dota2.exe 找到对应的窗口句柄和坐标
@@ -184,7 +208,7 @@ def click_in_window(win, rel_x, rel_y):
     screen_x = win.left + rel_x
     screen_y = win.top + rel_y
 
-    activate_window(win)
+    # activate_window(win)
     pydirectinput.moveTo(screen_x, screen_y)
     pydirectinput.click()
     print(f"👉 点击窗口内 ({rel_x}, {rel_y}) -> 屏幕 ({screen_x}, {screen_y})")
@@ -242,11 +266,10 @@ def restart_dota_via_steam():
     return None
 
 def cleanup():
-    """脚本退出时，强制恢复所有窗口的置顶状态"""
-    print("脚本退出，正在恢复窗口层级...")
+    print("脚本退出，恢复窗口层级...")
     win = find_dota_window()
     if win:
-        cancel_topmost(win)
+        set_window_topmost(win, False)
 
 def cancel_topmost(win):
     """取消窗口置顶，恢复正常层级"""
@@ -274,26 +297,27 @@ def main():
     while True:
         win = find_dota_window()
         if not win:
-            print("未找到 Dota 2 窗口，等待中...")
+            # print("未找到 Dota 2 窗口，等待中...")
             time.sleep(3)
             continue
 
-        # 截图前先临时置顶
-        activate_window(win)
-        time.sleep(0.1)
+        # 1. 截图前临时置顶
+        set_window_topmost(win, True)
+        time.sleep(0.2) # 给窗口一点响应时间
 
         try:
+            # 2. 截图
             screen = grab_window(win)
 
             # ================= 优先级 1：检测到“需要更新”弹窗 =================
             center, score = match_template(screen, TEMPLATES["update_popup"])
             if center:
                 print(f"🚨 识别到[需要更新]弹窗（匹配度 {score:.2f}），直接强制关闭游戏...")
-                # 因为后面要等很久，提前取消置顶，防止一直霸屏
-                cancel_topmost(win)
+                # 这里因为要等待很久，提前取消置顶，防止一直霸屏
+                set_window_topmost(win, False)
                 close_dota()
                 restart_dota_via_steam()
-                print("等待游戏重新启动，跳过几轮轮询...")
+                # print("等待游戏重新启动，跳过几轮轮询...")
                 time.sleep(15)
                 continue
 
@@ -321,12 +345,12 @@ def main():
                 time.sleep(CLICK_DELAY)
                 continue
 
-            print("未识别到目标弹窗，继续轮询...")
+            # print("未识别到目标弹窗，继续轮询...")
             time.sleep(POLL_INTERVAL)
 
         finally:
-            # 无论走哪个分支，只要本轮结束了，就取消置顶
-            cancel_topmost(win)
+            # 3. 无论本轮发生了什么（包括 continue 和报错），最后一定取消置顶
+            set_window_topmost(win, False)
 
 
 atexit.register(cleanup)
