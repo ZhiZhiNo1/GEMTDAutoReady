@@ -2,6 +2,9 @@ import sys
 import os
 import time
 import subprocess
+import logging
+import tempfile
+from logging.handlers import RotatingFileHandler
 
 import cv2
 import mss
@@ -43,7 +46,107 @@ UPDATE_WAIT_MINUTES = 60
 pydirectinput.PAUSE = 0.05
 pydirectinput.FAILSAFE = True # 鼠标移动到左上角强制停止
 
-# ================= 3. 然后才是各个功能函数 =================
+# ================= 3. 日志配置 =================
+LOG_FILE_NAME = "dota2auto.log"
+LOG_MAX_BYTES = 2 * 1024 * 1024   # 单个日志文件上限 2MB，超出后自动切分
+LOG_BACKUP_COUNT = 3              # 最多保留 3 个历史日志
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+logger = logging.getLogger("dota2auto")
+
+# setup_logging() 执行后填入日志文件真实路径，便于启动提示和排查问题
+LOG_FILE_PATH = None
+
+
+def is_frozen():
+    """是否由 PyInstaller 打包运行（onefile / onedir 均为 True）"""
+    return getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")
+
+
+def get_app_dir():
+    """
+    程序所在目录。
+
+    打包后 sys.executable 就是 exe 自身的路径；
+    这里不能用 sys._MEIPASS —— onefile 模式下它是临时解压目录，进程退出即被删除，
+    日志写进去等于没写。源码运行时取脚本所在目录，避免受启动时工作目录影响。
+    """
+    if is_frozen():
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def pick_log_dir():
+    """
+    挑一个真正可写的日志目录：
+    1) exe 同级的 logs/  （绿色版最直观）
+    2) %LOCALAPPDATA%/Dota2Auto/logs/  （exe 放在 Program Files 等无写权限位置时）
+    3) 系统临时目录
+    """
+    candidates = [os.path.join(get_app_dir(), "logs")]
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        candidates.append(os.path.join(local_appdata, "Dota2Auto", "logs"))
+    candidates.append(os.path.join(tempfile.gettempdir(), "Dota2Auto", "logs"))
+
+    for path in candidates:
+        try:
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, ".write_test")
+            with open(probe, "w", encoding="utf-8"):
+                pass
+            os.remove(probe)
+            return path
+        except OSError:
+            continue
+    return None
+
+
+def setup_logging():
+    """控制台 + 文件双通道日志（重复调用不会叠加 handler）"""
+    global LOG_FILE_PATH
+
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT)
+
+    # ---- 控制台 ----
+    # 打包成无控制台窗口（console=False）时 sys.stdout 为 None，此时跳过，避免启动即崩
+    stream = sys.stdout
+    if stream is not None:
+        try:
+            # 输出被重定向到管道/文件时默认是 GBK，日志里的 emoji 会抛 UnicodeEncodeError
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+        console_handler = logging.StreamHandler(stream)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+
+    # ---- 文件 ----
+    log_dir = pick_log_dir()
+    if log_dir:
+        LOG_FILE_PATH = os.path.join(log_dir, LOG_FILE_NAME)
+        file_handler = RotatingFileHandler(
+            LOG_FILE_PATH,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.info("日志文件：%s", LOG_FILE_PATH)
+    else:
+        logger.warning("⚠️ 找不到可写的日志目录，本次运行只输出到控制台。")
+
+    return logger
+
+
+# ================= 4. 然后才是各个功能函数 =================
 def activate_window(win):
     """只将 Dota2 窗口置顶，不强行抢夺焦点（避免报错）"""
     if not win:
@@ -66,7 +169,7 @@ def activate_window(win):
         
     except Exception as e:
         # 即使置顶失败，也不让它崩溃，继续跑
-        print(f"⚠️ 窗口置顶失败: {e}")
+        logger.warning("⚠️ 窗口置顶失败: %s", e)
 
 def set_window_topmost(win, enable):
     """设置窗口置顶状态
@@ -90,7 +193,7 @@ def set_window_topmost(win, enable):
             win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
         )
     except Exception as e:
-        print(f"⚠️ 设置窗口置顶状态失败: {e}")        
+        logger.warning("⚠️ 设置窗口置顶状态失败: %s", e)        
 
 def find_dota_window():
     """
@@ -211,7 +314,7 @@ def click_in_window(win, rel_x, rel_y):
     # activate_window(win)
     pydirectinput.moveTo(screen_x, screen_y)
     pydirectinput.click()
-    print(f"👉 点击窗口内 ({rel_x}, {rel_y}) -> 屏幕 ({screen_x}, {screen_y})")
+    logger.info("👉 点击窗口内 (%s, %s) -> 屏幕 (%s, %s)", rel_x, rel_y, screen_x, screen_y)
 
 def is_process_running(process_name):
     """判断进程是否在运行"""
@@ -224,49 +327,49 @@ def is_process_running(process_name):
     return False
 
 def close_dota():
-    print("强制关闭 Dota 2...")
+    logger.warning("强制关闭 Dota 2...")
     # /T 表示终止指定的进程和由它启用的子进程
     subprocess.run(["taskkill", "/IM", DOTA_PROCESS, "/T", "/F"], capture_output=True)
     time.sleep(5) # 等系统释放进程资源
 
 def restart_dota_via_steam():
     """通过 Steam 重启 Dota2，并等待更新和窗口出现"""
-    print("通过 Steam 拉起 Dota2（Steam 会处理更新）...")
+    logger.info("通过 Steam 拉起 Dota2（Steam 会处理更新）...")
     os.startfile(DOTA_STEAM_URL)
 
     # 根据配置的分钟数，计算需要检查多少次（每 10 秒检查一次）
     # 公式：分钟数 * 60秒 / 10秒 = 分钟数 * 6
     max_checks = UPDATE_WAIT_MINUTES * 6 
     
-    print(f"等待 Dota2 进程出现（最长等待 {UPDATE_WAIT_MINUTES} 分钟）...")
+    logger.info("等待 Dota2 进程出现（最长等待 %s 分钟）...", UPDATE_WAIT_MINUTES)
     
     for i in range(max_checks):
         if is_process_running(DOTA_PROCESS):
-            print(f"✅ Dota2 进程已出现（等待了 {i*10} 秒）")
+            logger.info("✅ Dota2 进程已出现（等待了 %s 秒）", i * 10)
             break
         time.sleep(10)
         # 每隔 1 分钟打印一次日志，避免刷屏
         if i % 6 == 0:
             elapsed_min = i * 10 // 60
-            print(f"⏳ 仍在等待更新和启动... 已等待 {elapsed_min} 分钟 / 共 {UPDATE_WAIT_MINUTES} 分钟")
+            logger.info("⏳ 仍在等待更新和启动... 已等待 %s 分钟 / 共 %s 分钟", elapsed_min, UPDATE_WAIT_MINUTES)
     else:
         # 如果循环正常走完（没有 break），说明超时了
-        print(f"⚠️ 等待 Dota2 进程超时（超过 {UPDATE_WAIT_MINUTES} 分钟），请检查 Steam 是否在下载更新。")
+        logger.warning("⚠️ 等待 Dota2 进程超时（超过 %s 分钟），请检查 Steam 是否在下载更新。", UPDATE_WAIT_MINUTES)
 
     # 等待窗口出现，继续轮询
-    print("等待 Dota2 窗口就绪...")
+    logger.info("等待 Dota2 窗口就绪...")
     for _ in range(60): # 再等 5 分钟找窗口（这个可以写死，因为进程都有了，窗口通常很快就出来）
         win = find_dota_window()
         if win:
-            print("✅ Dota2 窗口已成功出现！继续轮询。")
+            logger.info("✅ Dota2 窗口已成功出现！继续轮询。")
             return win
         time.sleep(5)
 
-    print("⚠️ 等待 Dota2 窗口超时。")
+    logger.warning("⚠️ 等待 Dota2 窗口超时。")
     return None
 
 def cleanup():
-    print("脚本退出，恢复窗口层级...")
+    logger.info("脚本退出，恢复窗口层级...")
     win = find_dota_window()
     if win:
         set_window_topmost(win, False)
@@ -283,16 +386,20 @@ def cancel_topmost(win):
             win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
         )
     except Exception as e:
-        print(f"⚠️ 取消窗口置顶失败: {e}")
+        logger.warning("⚠️ 取消窗口置顶失败: %s", e)
 
 def main():
-    print("Dota2 自动点击脚本启动...")
-    print("提示：请确保游戏为「无边框窗口」模式，Windows缩放为100%")
-    
-    # 强制打印一下当前配置的模板是否存在
+    logger.info("Dota2 自动点击脚本启动...")
+    logger.info("运行模式：%s | 程序目录：%s",
+                "打包运行(onefile)" if is_frozen() else "源码运行", get_app_dir())
+    logger.info("提示：请确保游戏为「无边框窗口」模式，Windows缩放为100%")
+    logger.info("匹配阈值 %.2f | 轮询间隔 %s 秒 | 更新最长等待 %s 分钟",
+                THRESHOLD, POLL_INTERVAL, UPDATE_WAIT_MINUTES)
+
+    # 启动时核对一下模板文件是否齐全
     for name, path in TEMPLATES.items():
         if not os.path.exists(path):
-            print(f"⚠️ 警告：模板文件缺失 {path}，请先制作模板图片！")
+            logger.warning("⚠️ 模板文件缺失：%s，请先制作模板图片！", path)
 
     while True:
         win = find_dota_window()
@@ -312,7 +419,7 @@ def main():
             # ================= 优先级 1：检测到“需要更新”弹窗 =================
             center, score = match_template(screen, TEMPLATES["update_popup"])
             if center:
-                print(f"🚨 识别到[需要更新]弹窗（匹配度 {score:.2f}），直接强制关闭游戏...")
+                logger.warning("🚨 识别到[需要更新]弹窗（匹配度 %.2f），直接强制关闭游戏...", score)
                 # 这里因为要等待很久，提前取消置顶，防止一直霸屏
                 set_window_topmost(win, False)
                 close_dota()
@@ -324,7 +431,7 @@ def main():
             # ================= 优先级 2：检测到“开始游戏” =================
             center, score = match_template(screen, TEMPLATES["start_game"])
             if center:
-                print(f"✅ 识别到[开始游戏]按钮，匹配度 {score:.2f}")
+                logger.info("✅ 识别到[开始游戏]按钮，匹配度 %.2f", score)
                 click_in_window(win, center[0], center[1])
                 time.sleep(CLICK_DELAY)
                 continue
@@ -332,7 +439,7 @@ def main():
             # ================= 优先级 3：检测到“游戏就绪-接受” =================
             center, score = match_template(screen, TEMPLATES["accept_ready"])
             if center:
-                print(f"✅ 识别到[游戏就绪-接受]按钮，匹配度 {score:.2f}")
+                logger.info("✅ 识别到[游戏就绪-接受]按钮，匹配度 %.2f", score)
                 click_in_window(win, center[0], center[1])
                 time.sleep(CLICK_DELAY)
                 continue
@@ -340,7 +447,7 @@ def main():
             # ================= 优先级 4：检测到“组队邀请-接受” =================
             center, score = match_template(screen, TEMPLATES["accept_invite"])
             if center:
-                print(f"✅ 识别到[组队邀请-接受]按钮，匹配度 {score:.2f}")
+                logger.info("✅ 识别到[组队邀请-接受]按钮，匹配度 %.2f", score)
                 click_in_window(win, center[0], center[1])
                 time.sleep(CLICK_DELAY)
                 continue
@@ -356,4 +463,11 @@ def main():
 atexit.register(cleanup)
 
 if __name__ == "__main__":
-    main()
+    setup_logging()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("收到 Ctrl+C，脚本退出。")
+    except Exception:
+        # 打包后一闪而退的崩溃，traceback 会完整留在日志文件里
+        logger.exception("❌ 脚本异常退出")
