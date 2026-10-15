@@ -26,18 +26,24 @@ def get_resource_path(relative_path):
 
 # ================= 2. 再定义配置变量 =================
 TEMPLATES = {
-    "accept_ready": get_resource_path("templates/accept_ready.png"),
-    "start_game": get_resource_path("templates/start_game.png"),
-    "accept_invite": get_resource_path("templates/accept_invite.png"),
     "update_popup": get_resource_path("templates/update_popup.png"),
+    "xhb_notification_badge": get_resource_path("templates/xhb_notification_badge.png"),
+    "xhb_accept_invite": get_resource_path("templates/xhb_accept_invite.png"),
+    "xhb_ready": get_resource_path("templates/xhb_ready.png"),
+    "xhb_cancel_ready": get_resource_path("templates/xhb_cancel_ready.png"),
 }
 
 THRESHOLD = 0.80          # 匹配阈值，根据实际环境调整（0.75~0.9）
 POLL_INTERVAL = 4         # 每 3~5 秒轮询一次
 CLICK_DELAY = 2           # 点击后等几秒，避免重复点击同一个弹窗
+XHB_MATCH_THRESHOLD = 0.86
+XHB_ACTION_COOLDOWN = 5   # 小黑盒动作冷却，避免界面短暂未刷新时重复点击
 DOTA_PROCESS = "dota2.exe"
 DOTA_STEAM_URL = "steam://rungameid/570"   # Dota2 AppID = 570
 WINDOW_KEYWORD = "Dota 2"
+# 小黑盒不同版本的进程名/窗口标题可能不同，可通过环境变量追加匹配关键词（逗号分隔）。
+XHB_PROCESS_KEYWORDS = ("heybox", "xiaohei", "blackbox")
+XHB_TITLE_KEYWORDS = ("小黑盒", "游戏")
 
 # 等待游戏更新并重启的最长时间（分钟）
 # 根据你平时的更新下载速度和 Steam 后台下载速度来调整，建议 30-60 分钟
@@ -276,8 +282,85 @@ def find_dota_window():
 
     return DotaWindow(best_window)
 
+
+def find_xiaoheihei_window():
+    """按进程名或窗口标题查找小黑盒客户端窗口，优先选择更明确的匹配。"""
+    process_keywords = list(XHB_PROCESS_KEYWORDS)
+    title_keywords = list(XHB_TITLE_KEYWORDS)
+    process_keywords += [x.strip().lower() for x in os.environ.get("DOTA2AUTO_XHB_PROCESS_KEYWORDS", "").split(",") if x.strip()]
+    title_keywords += [x.strip().lower() for x in os.environ.get("DOTA2AUTO_XHB_TITLE_KEYWORDS", "").split(",") if x.strip()]
+
+    matches = []
+
+    def enum_windows_callback(hwnd, windows):
+        if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+            return True
+
+        title = win32gui.GetWindowText(hwnd)
+        if not title:
+            return True
+
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        try:
+            process_name = psutil.Process(pid).name().lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            process_name = ""
+
+        if process_name == DOTA_PROCESS.lower():
+            return True
+
+        rect = win32gui.GetWindowRect(hwnd)
+        left, top, right, bottom = rect
+        width, height = right - left, bottom - top
+        if width < 500 or height < 350:
+            return True
+
+        process_match = any(key in process_name for key in process_keywords)
+        title_match = any(
+            (title.strip() == key) if key == "游戏" else (key.casefold() in title.casefold())
+            for key in title_keywords
+        )
+        if not process_match and not title_match:
+            return True
+
+        # 进程名命中最可靠，其次是“小黑盒”标题；“游戏”是截图里当前客户端的通用标题。
+        rank = 3 if process_match else (2 if "小黑盒" in title else 1)
+        windows.append({
+            "hwnd": hwnd,
+            "title": title,
+            "left": left,
+            "top": top,
+            "width": width,
+            "height": height,
+            "rank": rank,
+        })
+        return True
+
+    win32gui.EnumWindows(enum_windows_callback, matches)
+    if not matches:
+        return None
+
+    data = max(matches, key=lambda w: (w["rank"], w["width"] * w["height"]))
+
+    class XiaoheiheiWindow:
+        def __init__(self, info):
+            self.hwnd = info["hwnd"]
+            self.title = info["title"]
+            self.left = info["left"]
+            self.top = info["top"]
+            self.width = info["width"]
+            self.height = info["height"]
+
+        def isMinimized(self):
+            return win32gui.IsIconic(self.hwnd)
+
+        def restore(self):
+            win32gui.ShowWindow(self.hwnd, 9)
+
+    return XiaoheiheiWindow(data)
+
 def grab_window(win):
-    """截取 Dota2 窗口画面"""
+    """截取指定窗口画面"""
     left, top = win.left, win.top
     width, height = win.width, win.height
 
@@ -305,6 +388,33 @@ def match_template(screen_bgr, template_path, threshold=THRESHOLD):
         return center, max_val
 
     return None, max_val
+
+
+def match_template_scaled(screen_bgr, template_path, threshold=XHB_MATCH_THRESHOLD):
+    """小黑盒窗口尺寸/DPI可能变化，尝试多个模板比例并返回最佳匹配。"""
+    if not os.path.exists(template_path):
+        return None, 0.0
+
+    template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+    if template is None:
+        return None, 0.0
+
+    screen_h, screen_w = screen_bgr.shape[:2]
+    best_center, best_score = None, 0.0
+    for scale in (0.65, 0.75, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.4):
+        width = max(1, round(template.shape[1] * scale))
+        height = max(1, round(template.shape[0] * scale))
+        if width > screen_w or height > screen_h:
+            continue
+        interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+        resized = cv2.resize(template, (width, height), interpolation=interpolation)
+        result = cv2.matchTemplate(screen_bgr, resized, cv2.TM_CCOEFF_NORMED)
+        _, score, _, location = cv2.minMaxLoc(result)
+        if score > best_score:
+            best_score = score
+            best_center = (location[0] + width // 2, location[1] + height // 2)
+
+    return (best_center, best_score) if best_score >= threshold else (None, best_score)
 
 def click_in_window(win, rel_x, rel_y):
     """在窗口内相对坐标点击"""
@@ -392,72 +502,86 @@ def main():
     logger.info("Dota2 自动点击脚本启动...")
     logger.info("运行模式：%s | 程序目录：%s",
                 "打包运行(onefile)" if is_frozen() else "源码运行", get_app_dir())
-    logger.info("提示：请确保游戏为「无边框窗口」模式，Windows缩放为100%")
+    logger.info("提示：请保持小黑盒客户端窗口打开且未最小化；Dota 2 需运行以检测更新弹窗。")
     logger.info("匹配阈值 %.2f | 轮询间隔 %s 秒 | 更新最长等待 %s 分钟",
                 THRESHOLD, POLL_INTERVAL, UPDATE_WAIT_MINUTES)
+    logger.info("小黑盒匹配阈值 %.2f | 操作冷却 %s 秒", XHB_MATCH_THRESHOLD, XHB_ACTION_COOLDOWN)
 
     # 启动时核对一下模板文件是否齐全
     for name, path in TEMPLATES.items():
         if not os.path.exists(path):
             logger.warning("⚠️ 模板文件缺失：%s，请先制作模板图片！", path)
 
+    last_xhb_action = 0
+
     while True:
-        win = find_dota_window()
-        if not win:
-            # print("未找到 Dota 2 窗口，等待中...")
-            time.sleep(3)
+        # Dota 仍是游戏运行依赖：继续检测其更新弹窗，并沿用原有 Steam 重启逻辑。
+        dota_win = find_dota_window()
+        handled_dota_update = False
+        if dota_win:
+            set_window_topmost(dota_win, True)
+            time.sleep(0.2)
+            try:
+                dota_screen = grab_window(dota_win)
+
+                # TODO: 在这里预留 Dota 游戏内更新操作的识别/处理入口；该流程尚未实现。
+                # 当前只保留现有的“需要更新”弹窗检测和 Steam 重启逻辑。
+                center, score = match_template(dota_screen, TEMPLATES["update_popup"])
+                if center:
+                    logger.warning("🚨 识别到 Dota [需要更新]弹窗（匹配度 %.2f），通过 Steam 重启游戏...", score)
+                    set_window_topmost(dota_win, False)
+                    close_dota()
+                    restart_dota_via_steam()
+                    time.sleep(15)
+                    handled_dota_update = True
+            finally:
+                set_window_topmost(dota_win, False)
+
+        if handled_dota_update:
             continue
 
-        # 1. 截图前临时置顶
-        set_window_topmost(win, True)
-        time.sleep(0.2) # 给窗口一点响应时间
-
-        try:
-            # 2. 截图
-            screen = grab_window(win)
-
-            # ================= 优先级 1：检测到“需要更新”弹窗 =================
-            center, score = match_template(screen, TEMPLATES["update_popup"])
-            if center:
-                logger.warning("🚨 识别到[需要更新]弹窗（匹配度 %.2f），直接强制关闭游戏...", score)
-                # 这里因为要等待很久，提前取消置顶，防止一直霸屏
-                set_window_topmost(win, False)
-                close_dota()
-                restart_dota_via_steam()
-                # print("等待游戏重新启动，跳过几轮轮询...")
-                time.sleep(15)
-                continue
-
-            # ================= 优先级 2：检测到“开始游戏” =================
-            center, score = match_template(screen, TEMPLATES["start_game"])
-            if center:
-                logger.info("✅ 识别到[开始游戏]按钮，匹配度 %.2f", score)
-                click_in_window(win, center[0], center[1])
-                time.sleep(CLICK_DELAY)
-                continue
-
-            # ================= 优先级 3：检测到“游戏就绪-接受” =================
-            center, score = match_template(screen, TEMPLATES["accept_ready"])
-            if center:
-                logger.info("✅ 识别到[游戏就绪-接受]按钮，匹配度 %.2f", score)
-                click_in_window(win, center[0], center[1])
-                time.sleep(CLICK_DELAY)
-                continue
-
-            # ================= 优先级 4：检测到“组队邀请-接受” =================
-            center, score = match_template(screen, TEMPLATES["accept_invite"])
-            if center:
-                logger.info("✅ 识别到[组队邀请-接受]按钮，匹配度 %.2f", score)
-                click_in_window(win, center[0], center[1])
-                time.sleep(CLICK_DELAY)
-                continue
-
-            # print("未识别到目标弹窗，继续轮询...")
+        # 小黑盒负责组队操作；Dota 窗口里不再自动点击开始/准备。
+        xhb_win = find_xiaoheihei_window()
+        if not xhb_win:
+            logger.debug("未找到小黑盒窗口，继续监控 Dota 更新状态。")
             time.sleep(POLL_INTERVAL)
+            continue
 
+        set_window_topmost(xhb_win, True)
+        time.sleep(0.2)
+        try:
+            xhb_screen = grab_window(xhb_win)
+            action_center = None
+            action_name = None
+            action_score = 0.0
+
+            # 邀请弹窗优先，避免通知入口遮挡可直接处理的“接受”按钮。
+            center, score = match_template_scaled(xhb_screen, TEMPLATES["xhb_accept_invite"])
+            if center:
+                action_center, action_name, action_score = center, "接受小黑盒组队邀请", score
+            else:
+                # 入队后点击“准备”；若已出现“取消准备”，表示已准备，等待队长开始。
+                ready_center, ready_score = match_template_scaled(xhb_screen, TEMPLATES["xhb_ready"])
+                cancel_center, cancel_score = match_template_scaled(xhb_screen, TEMPLATES["xhb_cancel_ready"])
+                if ready_center and (not cancel_center or ready_score > cancel_score):
+                    action_center, action_name, action_score = ready_center, "在小黑盒队伍中准备", ready_score
+                elif cancel_center:
+                    logger.debug("小黑盒队伍已准备，等待队长开始（匹配度 %.2f）。", cancel_score)
+                else:
+                    bell_center, bell_score = match_template_scaled(xhb_screen, TEMPLATES["xhb_notification_badge"])
+                    if bell_center:
+                        action_center, action_name, action_score = bell_center, "打开小黑盒邀请通知", bell_score
+
+            now = time.monotonic()
+            if action_center and now - last_xhb_action >= XHB_ACTION_COOLDOWN:
+                logger.info("✅ 识别到[%s]，匹配度 %.2f", action_name, action_score)
+                click_in_window(xhb_win, action_center[0], action_center[1])
+                last_xhb_action = now
+                time.sleep(CLICK_DELAY)
         finally:
-            # 3. 无论本轮发生了什么（包括 continue 和报错），最后一定取消置顶
-            set_window_topmost(win, False)
+            set_window_topmost(xhb_win, False)
+
+        time.sleep(POLL_INTERVAL)
 
 
 atexit.register(cleanup)
