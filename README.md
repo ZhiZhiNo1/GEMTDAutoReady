@@ -31,9 +31,13 @@ python tests/check_xhb_notification_badge.py "G:\path\to\screenshot.png"
 python tests/check_xhb_accept_invite.py "G:\path\to\screenshot.png"
 python tests/check_xhb_ready.py "G:\path\to\screenshot.png"
 python tests/check_xhb_cancel_ready.py "G:\path\to\screenshot.png"
+python tests/check_xhb_arcade_match.py "G:\path\to\screenshot.png"
+python tests/check_xhb_gem_td.py "G:\path\to\screenshot.png"
 ```
 
 默认阈值与程序一致（Dota 为 `0.76`，小黑盒为 `0.86`）。可用 `--threshold` 临时指定阈值、`--template` 指定模板；小黑盒截图还可用 `--scale` 指定显示缩放比例（默认 `1.0`）。返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
+
+小黑盒如果回到默认页面，脚本会识别并点击“游廊匹配”，随后识别宝石 TD 图标并进入该游戏页面，再恢复邀请和准备状态监控。
 
 ## 打包为 EXE
 

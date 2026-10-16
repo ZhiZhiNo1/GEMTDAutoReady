@@ -44,6 +44,8 @@ TEMPLATES = {
     "xhb_accept_invite": get_resource_path("templates/xhb_accept_invite.png"),
     "xhb_ready": get_resource_path("templates/xhb_ready.png"),
     "xhb_cancel_ready": get_resource_path("templates/xhb_cancel_ready.png"),
+    "xhb_arcade_match": get_resource_path("templates/xhb_arcade_match.png"),
+    "xhb_gem_td": get_resource_path("templates/xhb_gem_td.png"),
 }
 
 POLL_INTERVAL = 4         # 每 3~5 秒轮询一次
@@ -641,6 +643,8 @@ def monitor_xiaoheihei(stop_event):
             ready_center, ready_score = (None, 0.0)
             cancel_center, cancel_score = (None, 0.0)
             bell_center, bell_score = (None, 0.0)
+            arcade_center, arcade_score = (None, 0.0)
+            gem_td_center, gem_td_score = (None, 0.0)
 
             if xhb_flow_state in ("monitor_invite", "waiting_invite_card"):
                 invite_center, invite_score = match_template_scaled(
@@ -664,6 +668,24 @@ def monitor_xiaoheihei(stop_event):
                     TEMPLATES["xhb_notification_badge"],
                     preferred_scale=xhb_dpi_scale,
                 )
+            if (
+                xhb_flow_state == "monitor_invite"
+                and not invite_center
+                and not ready_center
+                and not cancel_center
+                and not bell_center
+            ):
+                arcade_center, arcade_score = match_template_scaled(
+                    xhb_screen,
+                    TEMPLATES["xhb_arcade_match"],
+                    preferred_scale=xhb_dpi_scale,
+                )
+            elif xhb_flow_state == "waiting_gem_td":
+                gem_td_center, gem_td_score = match_template_scaled(
+                    xhb_screen,
+                    TEMPLATES["xhb_gem_td"],
+                    preferred_scale=xhb_dpi_scale,
+                )
 
             ready_action = ready_center and (not cancel_center or ready_score > cancel_score)
             now = time.monotonic()
@@ -681,6 +703,18 @@ def monitor_xiaoheihei(stop_event):
                 elif bell_center:
                     action_center, action_name, action_score = bell_center, "打开小黑盒邀请通知", bell_score
                     next_flow_state = "waiting_invite_card"
+                elif arcade_center:
+                    action_center, action_name, action_score = arcade_center, "进入小黑盒游廊匹配", arcade_score
+                    next_flow_state = "waiting_gem_td"
+
+            elif xhb_flow_state == "waiting_gem_td":
+                if gem_td_center:
+                    action_center, action_name, action_score = gem_td_center, "进入宝石 TD", gem_td_score
+                    next_flow_state = "monitor_invite"
+                elif now - xhb_flow_started >= XHB_FLOW_TIMEOUT:
+                    logger.warning("进入游廊匹配后 %s 秒内未识别到宝石 TD，恢复常规识别。", XHB_FLOW_TIMEOUT)
+                    xhb_flow_state = "monitor_invite"
+                    continue
 
             elif xhb_flow_state == "waiting_invite_card":
                 if invite_center:
