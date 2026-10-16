@@ -21,15 +21,19 @@ python main.py
 
 在控制台按 `Ctrl+C` 正常退出，脚本会恢复 Dota 和小黑盒窗口层级。点击控制台关闭按钮时也会尝试清理；通过任务管理器强制结束进程则无法保证清理完成。
 
-## 检查 Dota 截图识别
+## 检查截图识别
 
-收到其他用户反馈的 Dota 更新弹窗截图时，可以在项目根目录运行以下命令，查看当前模板匹配得分和是否超过识别阈值：
+收到用户反馈的截图时，可按要检查的识别项运行对应脚本。每个脚本使用程序实际调用的匹配逻辑，并输出匹配分数、缩放比例和识别位置：
 
 ```powershell
-python tools/check_dota_screenshot.py "G:\path\to\screenshot.png"
+python tests/check_dota_update_popup.py "G:\path\to\screenshot.png"
+python tests/check_xhb_notification_badge.py "G:\path\to\screenshot.png"
+python tests/check_xhb_accept_invite.py "G:\path\to\screenshot.png"
+python tests/check_xhb_ready.py "G:\path\to\screenshot.png"
+python tests/check_xhb_cancel_ready.py "G:\path\to\screenshot.png"
 ```
 
-识别阈值默认为 `0.76`；可用 `--threshold` 临时指定阈值，也可用 `--template` 指定另一张模板图片。命令返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
+默认阈值与程序一致（Dota 为 `0.76`，小黑盒为 `0.86`）。可用 `--threshold` 临时指定阈值、`--template` 指定模板；小黑盒截图还可用 `--scale` 指定显示缩放比例（默认 `1.0`）。返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
 
 ## 打包为 EXE
 
