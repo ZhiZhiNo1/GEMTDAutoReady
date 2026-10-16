@@ -21,6 +21,16 @@ python main.py
 
 在控制台按 `Ctrl+C` 正常退出，脚本会恢复 Dota 和小黑盒窗口层级。点击控制台关闭按钮时也会尝试清理；通过任务管理器强制结束进程则无法保证清理完成。
 
+## 检查 Dota 截图识别
+
+收到其他用户反馈的 Dota 更新弹窗截图时，可以在项目根目录运行以下命令，查看当前模板匹配得分和是否超过识别阈值：
+
+```powershell
+python tools/check_dota_screenshot.py "G:\path\to\screenshot.png"
+```
+
+识别阈值默认为 `0.76`；可用 `--threshold` 临时指定阈值，也可用 `--template` 指定另一张模板图片。命令返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
+
 ## 打包为 EXE
 
 在项目根目录运行以下命令：
