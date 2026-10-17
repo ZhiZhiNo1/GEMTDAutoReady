@@ -80,6 +80,7 @@ WINDOW_OPERATION_LOCK = threading.RLock()
 WINDOW_OPERATION_CONDITION = threading.Condition(WINDOW_OPERATION_LOCK)
 NEXT_WINDOW_OPERATION = "dota"
 WINDOW_TURN_STARTED_AT = 0.0
+WINDOWS_OVERLAP_MODE = False
 WINDOW_LAYER_ACCESS_WARNING_LOGGED = False
 
 
@@ -213,44 +214,74 @@ def bring_window_to_front(win):
         raise
 
 
-def capture_window_on_turn(window_name, win, grab_func, stop_event, wait_timeout):
-    """按 Dota/小黑盒轮次截图；图像匹配由调用方在锁外执行。"""
-    global NEXT_WINDOW_OPERATION, WINDOW_TURN_STARTED_AT
+def windows_overlap(win_a, win_b):
+    """按窗口外框判断两个客户端窗口是否相交；无法读取时按相交处理以保证安全。"""
+    if not win_a or not win_b:
+        return False
+    try:
+        left_a, top_a, right_a, bottom_a = win32gui.GetWindowRect(win_a.hwnd)
+        left_b, top_b, right_b, bottom_b = win32gui.GetWindowRect(win_b.hwnd)
+    except Exception:
+        logger.debug("读取窗口外框失败，保守按窗口重叠处理。", exc_info=True)
+        return True
+    return left_a < right_b and right_a > left_b and top_a < bottom_b and bottom_a > top_b
+
+
+def capture_window_on_turn(window_name, win, other_win, grab_func, stop_event, wait_timeout):
+    """重叠时按轮次截图；不重叠时各自置顶截图。匹配始终在锁外执行。"""
+    global NEXT_WINDOW_OPERATION, WINDOW_TURN_STARTED_AT, WINDOWS_OVERLAP_MODE
     next_window = "xhb" if window_name == "dota" else "dota"
-    deadline = time.monotonic() + wait_timeout
+    overlapping = windows_overlap(win, other_win)
+
+    if overlapping:
+        deadline = time.monotonic() + wait_timeout
+        with WINDOW_OPERATION_CONDITION:
+            if not WINDOWS_OVERLAP_MODE:
+                WINDOWS_OVERLAP_MODE = True
+                NEXT_WINDOW_OPERATION = window_name
+                WINDOW_OPERATION_CONDITION.notify_all()
+            while NEXT_WINDOW_OPERATION != window_name and not stop_event.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # 对端可能在 Steam 重启或异常处理中暂时无法轮询，超时后让出机会，避免卡住。
+                    logger.debug("等待 %s 窗口操作轮次超时，继续本轮。", window_name)
+                    NEXT_WINDOW_OPERATION = window_name
+                    break
+                WINDOW_OPERATION_CONDITION.wait(min(remaining, 0.2))
+
+            if stop_event.is_set():
+                return None, overlapping
+
+            try:
+                bring_window_to_front(win)
+                time.sleep(0.2)
+                screen = grab_func(win)
+                WINDOW_TURN_STARTED_AT = time.monotonic()
+                return screen, overlapping
+            except WindowLayerAccessDenied:
+                NEXT_WINDOW_OPERATION = next_window
+                WINDOW_OPERATION_CONDITION.notify_all()
+                raise
+            except Exception:
+                NEXT_WINDOW_OPERATION = next_window
+                WINDOW_OPERATION_CONDITION.notify_all()
+                raise
 
     with WINDOW_OPERATION_CONDITION:
-        while NEXT_WINDOW_OPERATION != window_name and not stop_event.is_set():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                # 对端可能在 Steam 重启或异常处理中暂时无法轮询，超时后让出机会，避免卡住。
-                logger.debug("等待 %s 窗口操作轮次超时，继续本轮。", window_name)
-                NEXT_WINDOW_OPERATION = window_name
-                break
-            WINDOW_OPERATION_CONDITION.wait(min(remaining, 0.2))
-
-        if stop_event.is_set():
-            return None
-
-        try:
-            bring_window_to_front(win)
-            time.sleep(0.2)
-            screen = grab_func(win)
-            WINDOW_TURN_STARTED_AT = time.monotonic()
-            return screen
-        except WindowLayerAccessDenied:
-            NEXT_WINDOW_OPERATION = next_window
-            WINDOW_OPERATION_CONDITION.notify_all()
-            raise
-        except Exception:
-            NEXT_WINDOW_OPERATION = next_window
-            WINDOW_OPERATION_CONDITION.notify_all()
-            raise
+        WINDOWS_OVERLAP_MODE = False
+        WINDOW_OPERATION_CONDITION.notify_all()
+    if stop_event.is_set():
+        return None, overlapping
+    bring_window_to_front(win)
+    time.sleep(0.2)
+    return grab_func(win), overlapping
 
 
-def finish_window_turn(window_name, min_front_seconds, stop_event):
+def finish_window_turn(window_name, min_front_seconds, stop_event, overlapping=True):
     """匹配在锁外进行；识别结束后才交接窗口，并保证最短前置时间。"""
     global NEXT_WINDOW_OPERATION
+    if not overlapping:
+        return
     next_window = "xhb" if window_name == "dota" else "dota"
     with WINDOW_OPERATION_CONDITION:
         if NEXT_WINDOW_OPERATION != window_name:
@@ -271,15 +302,21 @@ def advance_window_turn_if_needed(window_name):
     global NEXT_WINDOW_OPERATION, WINDOW_TURN_STARTED_AT
     next_window = "xhb" if window_name == "dota" else "dota"
     with WINDOW_OPERATION_CONDITION:
+        if not WINDOWS_OVERLAP_MODE:
+            return
         if NEXT_WINDOW_OPERATION == window_name:
             NEXT_WINDOW_OPERATION = next_window
             WINDOW_TURN_STARTED_AT = time.monotonic()
             WINDOW_OPERATION_CONDITION.notify_all()
 
 
-def click_window_and_pass_turn(window_name, win, click_func):
+def click_window_and_pass_turn(window_name, win, click_func, overlapping=True):
     """点击目标窗口并唤醒另一窗口线程，保证鼠标操作不冲突。"""
     global NEXT_WINDOW_OPERATION, WINDOW_TURN_STARTED_AT
+    if not overlapping:
+        bring_window_to_front(win)
+        click_func()
+        return
     next_window = "xhb" if window_name == "dota" else "dota"
     with WINDOW_OPERATION_CONDITION:
         try:
@@ -291,8 +328,12 @@ def click_window_and_pass_turn(window_name, win, click_func):
             WINDOW_OPERATION_CONDITION.notify_all()
 
 
-def click_window_on_current_turn(win, click_func):
+def click_window_on_current_turn(win, click_func, overlapping=True):
     """在当前持有的窗口轮次内点击，稍后由 finish_window_turn 交接。"""
+    if not overlapping:
+        bring_window_to_front(win)
+        click_func()
+        return
     with WINDOW_OPERATION_CONDITION:
         bring_window_to_front(win)
         click_func()
@@ -601,9 +642,10 @@ def monitor_dota_updates(stop_event):
                     )
                     last_window_size_info = size_info
 
-                dota_screen = capture_window_on_turn(
+                dota_screen, windows_are_overlapping = capture_window_on_turn(
                     "dota",
                     dota_win,
+                    find_xiaoheihei_window(),
                     grab_client_window,
                     stop_event,
                     POLL_INTERVAL,
@@ -647,13 +689,16 @@ def monitor_dota_updates(stop_event):
                             start_center[0],
                             start_center[1],
                         ),
+                        overlapping=windows_are_overlapping,
                     )
                     start_button_was_visible = True
                     clicked_start_button = True
                 elif not start_center:
                     start_button_was_visible = False
 
-                finish_window_turn("dota", 1.5, stop_event)
+                finish_window_turn(
+                    "dota", 1.5, stop_event, overlapping=windows_are_overlapping
+                )
 
                 if center:
                     logger.warning(
@@ -756,9 +801,10 @@ def monitor_xiaoheihei(stop_event):
                 )
                 last_xhb_dpi_scale = xhb_dpi_scale
 
-            xhb_screen = capture_window_on_turn(
+            xhb_screen, windows_are_overlapping = capture_window_on_turn(
                 "xhb",
                 xhb_win,
+                find_dota_window(),
                 grab_window,
                 stop_event,
                 XHB_ACTIVE_POLL_INTERVAL
@@ -825,6 +871,7 @@ def monitor_xiaoheihei(stop_event):
                 "xhb",
                 0.5 if xhb_flow_state != "monitor_invite" else 1.5,
                 stop_event,
+                overlapping=windows_are_overlapping,
             )
 
             ready_action = ready_center and (not cancel_center or ready_score > cancel_score)
@@ -896,6 +943,7 @@ def monitor_xiaoheihei(stop_event):
                         action_center[0],
                         action_center[1],
                     ),
+                    overlapping=windows_are_overlapping,
                 )
                 xhb_flow_state = next_flow_state
                 xhb_flow_started = time.monotonic()
@@ -927,7 +975,7 @@ def main():
     logger.info("Dota 游戏内[开始游戏]按钮匹配阈值 %.2f",
                 DOTA_START_GAME_MATCH_THRESHOLD)
     logger.info("小黑盒匹配阈值 %.2f | 单步状态等待上限 %s 秒", XHB_MATCH_THRESHOLD, XHB_FLOW_TIMEOUT)
-    logger.info("Dota 与小黑盒窗口按轮次交替前置；图像匹配在窗口操作锁外执行。")
+    logger.info("Dota 与小黑盒窗口不重叠时分别置顶；重叠时按轮次交替前置。")
 
     for name, path in TEMPLATES.items():
         if not os.path.exists(path):
