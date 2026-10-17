@@ -77,6 +77,14 @@ LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 logger = logging.getLogger("dota2auto")
 WINDOW_OPERATION_LOCK = threading.RLock()
+WINDOW_OPERATION_CONDITION = threading.Condition(WINDOW_OPERATION_LOCK)
+NEXT_WINDOW_OPERATION = "dota"
+WINDOW_TURN_STARTED_AT = 0.0
+WINDOW_LAYER_ACCESS_WARNING_LOGGED = False
+
+
+class WindowLayerAccessDenied(RuntimeError):
+    """Windows denied the request to change a client window's z-order."""
 
 # setup_logging() 执行后填入日志文件真实路径，便于启动提示和排查问题
 LOG_FILE_PATH = None
@@ -170,53 +178,124 @@ def setup_logging():
 
 
 # ================= 4. 然后才是各个功能函数 =================
-def activate_window(win):
-    """只将 Dota2 窗口置顶，不强行抢夺焦点（避免报错）"""
+def bring_window_to_front(win):
+    """将窗口提到普通窗口层级前方，不抢夺键盘焦点。"""
+    global WINDOW_LAYER_ACCESS_WARNING_LOGGED
     if not win:
-        return
+        return None
+
+    if win.isMinimized():
+        win.restore()
+        time.sleep(0.2)
 
     try:
-        # 如果窗口最小化了，先恢复
-        if win.isMinimized():
-            win.restore()
-            time.sleep(0.2)
-            
-        # 只做置顶操作：将窗口设为最顶层
         win32gui.SetWindowPos(
-            win.hwnd, 
-            win32con.HWND_TOPMOST, 
-            0, 0, 0, 0, 
-            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
+            win.hwnd,
+            win32con.HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
         )
-        # 注意：不要调用 SetForegroundWindow，就不会报错了！
-        
-    except Exception as e:
-        # 即使置顶失败，也不让它崩溃，继续跑
-        logger.warning("⚠️ 窗口置顶失败: %s", e)
+    except Exception as exc:
+        error_code = getattr(exc, "winerror", None)
+        if error_code is None and getattr(exc, "args", None):
+            error_code = exc.args[0]
+        if error_code == 5:
+            if not WINDOW_LAYER_ACCESS_WARNING_LOGGED:
+                logger.warning(
+                    "Windows 拒绝调整客户端窗口层级。请通过管理员权限启动程序；"
+                    "当前将跳过本轮窗口操作。"
+                )
+                WINDOW_LAYER_ACCESS_WARNING_LOGGED = True
+            raise WindowLayerAccessDenied("SetWindowPos access denied") from exc
+        raise
 
-def set_window_topmost(win, enable):
-    """设置窗口置顶状态
-    enable=True: 置顶
-    enable=False: 取消置顶
-    """
-    if not win:
-        return
-    try:
-        if win.isMinimized():
-            win.restore()
+
+def capture_window_on_turn(window_name, win, grab_func, stop_event, wait_timeout):
+    """按 Dota/小黑盒轮次截图；图像匹配由调用方在锁外执行。"""
+    global NEXT_WINDOW_OPERATION, WINDOW_TURN_STARTED_AT
+    next_window = "xhb" if window_name == "dota" else "dota"
+    deadline = time.monotonic() + wait_timeout
+
+    with WINDOW_OPERATION_CONDITION:
+        while NEXT_WINDOW_OPERATION != window_name and not stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # 对端可能在 Steam 重启或异常处理中暂时无法轮询，超时后让出机会，避免卡住。
+                logger.debug("等待 %s 窗口操作轮次超时，继续本轮。", window_name)
+                NEXT_WINDOW_OPERATION = window_name
+                break
+            WINDOW_OPERATION_CONDITION.wait(min(remaining, 0.2))
+
+        if stop_event.is_set():
+            return None
+
+        try:
+            bring_window_to_front(win)
             time.sleep(0.2)
-        
-        # 根据参数选择置顶标志
-        flag = win32con.HWND_TOPMOST if enable else win32con.HWND_NOTOPMOST
-        
-        win32gui.SetWindowPos(
-            win.hwnd, 
-            flag, 
-            0, 0, 0, 0, 
-            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
-        )
-    except Exception as e:
-        logger.warning("⚠️ 设置窗口置顶状态失败: %s", e)        
+            screen = grab_func(win)
+            WINDOW_TURN_STARTED_AT = time.monotonic()
+            return screen
+        except WindowLayerAccessDenied:
+            NEXT_WINDOW_OPERATION = next_window
+            WINDOW_OPERATION_CONDITION.notify_all()
+            raise
+        except Exception:
+            NEXT_WINDOW_OPERATION = next_window
+            WINDOW_OPERATION_CONDITION.notify_all()
+            raise
+
+
+def finish_window_turn(window_name, min_front_seconds, stop_event):
+    """匹配在锁外进行；识别结束后才交接窗口，并保证最短前置时间。"""
+    global NEXT_WINDOW_OPERATION
+    next_window = "xhb" if window_name == "dota" else "dota"
+    with WINDOW_OPERATION_CONDITION:
+        if NEXT_WINDOW_OPERATION != window_name:
+            return
+
+        while not stop_event.is_set():
+            remaining = min_front_seconds - (time.monotonic() - WINDOW_TURN_STARTED_AT)
+            if remaining <= 0:
+                break
+            WINDOW_OPERATION_CONDITION.wait(min(remaining, 0.2))
+
+        NEXT_WINDOW_OPERATION = next_window
+        WINDOW_OPERATION_CONDITION.notify_all()
+
+
+def advance_window_turn_if_needed(window_name):
+    """窗口缺失时跳过该轮，避免另一监控线程等待不存在的窗口。"""
+    global NEXT_WINDOW_OPERATION, WINDOW_TURN_STARTED_AT
+    next_window = "xhb" if window_name == "dota" else "dota"
+    with WINDOW_OPERATION_CONDITION:
+        if NEXT_WINDOW_OPERATION == window_name:
+            NEXT_WINDOW_OPERATION = next_window
+            WINDOW_TURN_STARTED_AT = time.monotonic()
+            WINDOW_OPERATION_CONDITION.notify_all()
+
+
+def click_window_and_pass_turn(window_name, win, click_func):
+    """点击目标窗口并唤醒另一窗口线程，保证鼠标操作不冲突。"""
+    global NEXT_WINDOW_OPERATION, WINDOW_TURN_STARTED_AT
+    next_window = "xhb" if window_name == "dota" else "dota"
+    with WINDOW_OPERATION_CONDITION:
+        try:
+            bring_window_to_front(win)
+            click_func()
+        finally:
+            NEXT_WINDOW_OPERATION = next_window
+            WINDOW_TURN_STARTED_AT = time.monotonic()
+            WINDOW_OPERATION_CONDITION.notify_all()
+
+
+def click_window_on_current_turn(win, click_func):
+    """在当前持有的窗口轮次内点击，稍后由 finish_window_turn 交接。"""
+    with WINDOW_OPERATION_CONDITION:
+        bring_window_to_front(win)
+        click_func()
 
 def find_dota_window():
     """
@@ -288,15 +367,6 @@ def find_dota_window():
         def restore(self):
             win32gui.ShowWindow(self.hwnd, 9) # SW_RESTORE = 9
             
-        def activate(self):
-            # 只置顶，不抢焦点
-            win32gui.SetWindowPos(
-                self.hwnd, 
-                win32con.HWND_TOPMOST, 
-                0, 0, 0, 0, 
-                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
-            )
-
     return DotaWindow(best_window)
 
 
@@ -430,7 +500,6 @@ def click_in_window(win, rel_x, rel_y):
     screen_x = win.left + rel_x
     screen_y = win.top + rel_y
 
-    # activate_window(win)
     pydirectinput.moveTo(screen_x, screen_y)
     pydirectinput.click()
     logger.info("👉 点击窗口内 (%s, %s) -> 屏幕 (%s, %s)", rel_x, rel_y, screen_x, screen_y)
@@ -532,13 +601,15 @@ def monitor_dota_updates(stop_event):
                     )
                     last_window_size_info = size_info
 
-                with WINDOW_OPERATION_LOCK:
-                    set_window_topmost(dota_win, True)
-                    try:
-                        time.sleep(0.2)
-                        dota_screen = grab_client_window(dota_win)
-                    finally:
-                        set_window_topmost(dota_win, False)
+                dota_screen = capture_window_on_turn(
+                    "dota",
+                    dota_win,
+                    grab_client_window,
+                    stop_event,
+                    POLL_INTERVAL,
+                )
+                if dota_screen is None:
+                    break
 
                 # TODO: 在这里预留 Dota 游戏内更新操作的识别/处理入口；该流程尚未实现。
                 # 当前只保留现有的“需要更新”弹窗检测和 Steam 重启逻辑。
@@ -548,8 +619,43 @@ def monitor_dota_updates(stop_event):
                     DOTA_UPDATE_MATCH_THRESHOLD,
                     DOTA_UPDATE_FALLBACK_SCALES,
                 )
+                start_center = None
+                start_score = 0.0
+                start_scale = 1.0
+                if not center:
+                    start_center, start_score, start_scale = match_template_multiscale(
+                        dota_screen,
+                        TEMPLATES["dota_start_game"],
+                        DOTA_START_GAME_MATCH_THRESHOLD,
+                        DOTA_UPDATE_FALLBACK_SCALES,
+                        search_region=(0.0, 0.0, 1.0, 1.0),
+                    )
+
+                clicked_start_button = False
                 if center:
                     start_button_was_visible = False
+                elif start_center and not start_button_was_visible:
+                    logger.info(
+                        "✅ 识别到 Dota 游戏内[开始游戏]按钮（匹配度 %.2f，模板缩放 %.2f）",
+                        start_score,
+                        start_scale,
+                    )
+                    click_window_on_current_turn(
+                        dota_win,
+                        lambda: click_in_client_window(
+                            dota_win,
+                            start_center[0],
+                            start_center[1],
+                        ),
+                    )
+                    start_button_was_visible = True
+                    clicked_start_button = True
+                elif not start_center:
+                    start_button_was_visible = False
+
+                finish_window_turn("dota", 1.5, stop_event)
+
+                if center:
                     logger.warning(
                         "🚨 识别到 Dota [需要更新]弹窗（匹配度 %.2f，模板缩放 %.2f），通过 Steam 重启游戏...",
                         score,
@@ -559,55 +665,50 @@ def monitor_dota_updates(stop_event):
                         break
                     if restart_dota_via_steam(stop_event) and stop_event.wait(15):
                         break
-                else:
-                    start_center, start_score, start_scale = match_template_multiscale(
-                        dota_screen,
-                        TEMPLATES["dota_start_game"],
-                        DOTA_START_GAME_MATCH_THRESHOLD,
-                        DOTA_UPDATE_FALLBACK_SCALES,
-                    )
-                    if start_center:
-                        if not start_button_was_visible:
-                            logger.info(
-                                "✅ 识别到 Dota 游戏内[开始游戏]按钮（匹配度 %.2f，模板缩放 %.2f）",
-                                start_score,
-                                start_scale,
-                            )
-                            with WINDOW_OPERATION_LOCK:
-                                set_window_topmost(dota_win, True)
-                                try:
-                                    click_in_client_window(
-                                        dota_win,
-                                        start_center[0],
-                                        start_center[1],
-                                    )
-                                finally:
-                                    set_window_topmost(dota_win, False)
-                            start_button_was_visible = True
-                            if stop_event.wait(CLICK_DELAY):
-                                break
-                    else:
-                        start_button_was_visible = False
+                elif clicked_start_button and stop_event.wait(CLICK_DELAY):
+                    break
             else:
                 start_button_was_visible = False
+                advance_window_turn_if_needed("dota")
+        except WindowLayerAccessDenied:
+            advance_window_turn_if_needed("dota")
         except Exception:
+            advance_window_turn_if_needed("dota")
             logger.exception("Dota 更新监控发生异常，将在下一轮重试。")
 
         stop_event.wait(POLL_INTERVAL)
 
 def cleanup():
-    logger.info("脚本退出，恢复 Dota 和小黑盒窗口层级...")
+    logger.info("脚本退出，取消 Dota 和小黑盒的临时置顶...")
     with WINDOW_OPERATION_LOCK:
         for win in (find_dota_window(), find_xiaoheihei_window()):
-            if win:
-                set_window_topmost(win, False)
+            if not win:
+                continue
+            try:
+                win32gui.SetWindowPos(
+                    win.hwnd,
+                    win32con.HWND_NOTOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    win32con.SWP_NOMOVE
+                    | win32con.SWP_NOSIZE
+                    | win32con.SWP_NOACTIVATE,
+                )
+            except Exception as exc:
+                error_code = getattr(exc, "winerror", None)
+                if error_code is None and getattr(exc, "args", None):
+                    error_code = exc.args[0]
+                if error_code != 5:
+                    logger.exception("取消窗口临时置顶失败：%s", win.title)
 
 
 _console_close_handler = None
 
 
 def register_console_close_handler():
-    """点击控制台关闭按钮时尽量先恢复窗口层级；Ctrl+C 仍由 Python 正常处理。"""
+    """点击控制台关闭按钮时执行退出清理；Ctrl+C 仍由 Python 正常处理。"""
     global _console_close_handler
     if os.name != "nt":
         return
@@ -620,7 +721,7 @@ def register_console_close_handler():
             try:
                 cleanup()
             except Exception:
-                logger.exception("控制台关闭时恢复窗口层级失败")
+                logger.exception("控制台关闭时执行清理失败")
         # 让系统继续执行默认终止流程。
         return 0
 
@@ -630,20 +731,6 @@ def register_console_close_handler():
     kernel32.SetConsoleCtrlHandler.restype = ctypes.c_int
     if not kernel32.SetConsoleCtrlHandler(_console_close_handler, 1):
         logger.warning("注册控制台关闭处理器失败（错误码 %s）", ctypes.get_last_error())
-
-def cancel_topmost(win):
-    """取消窗口置顶，恢复正常层级"""
-    if not win:
-        return
-    try:
-        win32gui.SetWindowPos(
-            win.hwnd,
-            win32con.HWND_NOTOPMOST,  # 取消置顶
-            0, 0, 0, 0,
-            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
-        )
-    except Exception as e:
-        logger.warning("⚠️ 取消窗口置顶失败: %s", e)
 
 def monitor_xiaoheihei(stop_event):
     """独立处理小黑盒邀请和准备状态。"""
@@ -656,6 +743,7 @@ def monitor_xiaoheihei(stop_event):
             xhb_win = find_xiaoheihei_window()
             if not xhb_win:
                 logger.debug("未找到小黑盒窗口，继续轮询。")
+                advance_window_turn_if_needed("xhb")
                 stop_event.wait(POLL_INTERVAL)
                 continue
 
@@ -668,14 +756,17 @@ def monitor_xiaoheihei(stop_event):
                 )
                 last_xhb_dpi_scale = xhb_dpi_scale
 
-            # 两个监控线程可能同时调整窗口层级；串行化短暂的窗口操作。
-            with WINDOW_OPERATION_LOCK:
-                set_window_topmost(xhb_win, True)
-                try:
-                    time.sleep(0.2)
-                    xhb_screen = grab_window(xhb_win)
-                finally:
-                    set_window_topmost(xhb_win, False)
+            xhb_screen = capture_window_on_turn(
+                "xhb",
+                xhb_win,
+                grab_window,
+                stop_event,
+                XHB_ACTIVE_POLL_INTERVAL
+                if xhb_flow_state != "monitor_invite"
+                else POLL_INTERVAL,
+            )
+            if xhb_screen is None:
+                break
 
             action_center = None
             action_name = None
@@ -729,6 +820,12 @@ def monitor_xiaoheihei(stop_event):
                     TEMPLATES["xhb_gem_td"],
                     preferred_scale=xhb_dpi_scale,
                 )
+
+            finish_window_turn(
+                "xhb",
+                0.5 if xhb_flow_state != "monitor_invite" else 1.5,
+                stop_event,
+            )
 
             ready_action = ready_center and (not cancel_center or ready_score > cancel_score)
             now = time.monotonic()
@@ -791,12 +888,15 @@ def monitor_xiaoheihei(stop_event):
 
             if action_center:
                 logger.info("✅ 识别到[%s]，匹配度 %.2f", action_name, action_score)
-                with WINDOW_OPERATION_LOCK:
-                    set_window_topmost(xhb_win, True)
-                    try:
-                        click_in_window(xhb_win, action_center[0], action_center[1])
-                    finally:
-                        set_window_topmost(xhb_win, False)
+                click_window_and_pass_turn(
+                    "xhb",
+                    xhb_win,
+                    lambda: click_in_window(
+                        xhb_win,
+                        action_center[0],
+                        action_center[1],
+                    ),
+                )
                 xhb_flow_state = next_flow_state
                 xhb_flow_started = time.monotonic()
                 if stop_event.wait(CLICK_DELAY):
@@ -804,7 +904,10 @@ def monitor_xiaoheihei(stop_event):
                 # 动作后跳过常规轮询等待，尽快识别并处理下一步界面。
                 continue
 
+        except WindowLayerAccessDenied:
+            advance_window_turn_if_needed("xhb")
         except Exception:
+            advance_window_turn_if_needed("xhb")
             logger.exception("小黑盒监控发生异常，将在下一轮重试。")
             if stop_event.wait(POLL_INTERVAL):
                 break
@@ -824,6 +927,7 @@ def main():
     logger.info("Dota 游戏内[开始游戏]按钮匹配阈值 %.2f",
                 DOTA_START_GAME_MATCH_THRESHOLD)
     logger.info("小黑盒匹配阈值 %.2f | 单步状态等待上限 %s 秒", XHB_MATCH_THRESHOLD, XHB_FLOW_TIMEOUT)
+    logger.info("Dota 与小黑盒窗口按轮次交替前置；图像匹配在窗口操作锁外执行。")
 
     for name, path in TEMPLATES.items():
         if not os.path.exists(path):

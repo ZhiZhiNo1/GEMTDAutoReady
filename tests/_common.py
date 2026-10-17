@@ -36,7 +36,13 @@ def read_image(path):
     return image
 
 
-def run_check(recognition_name, template_name, is_dota=False, default_threshold=None):
+def run_check(
+    recognition_name,
+    template_name,
+    is_dota=False,
+    default_threshold=None,
+    search_region=None,
+):
     parser = argparse.ArgumentParser(
         description=f"Check a screenshot for {recognition_name}."
     )
@@ -84,6 +90,7 @@ def run_check(recognition_name, template_name, is_dota=False, default_threshold=
             str(args.template),
             args.threshold,
             DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=search_region or (0.2, 0.2, 0.8, 0.8),
         )
     else:
         center, score = match_template_scaled(

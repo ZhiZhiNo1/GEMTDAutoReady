@@ -12,8 +12,14 @@ DOTA_TEMPLATE_REFERENCE_WIDTH = 1920
 DOTA_UPDATE_FALLBACK_SCALES = (0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.45, 1.6, 1.8)
 
 
-def match_template_multiscale(screen_bgr, template_path, threshold, scales):
-    """灰度多尺度匹配；适配 Dota 界面随游戏分辨率/DPI 变化的缩放。"""
+def match_template_multiscale(
+    screen_bgr,
+    template_path,
+    threshold,
+    scales,
+    search_region=(0.2, 0.2, 0.8, 0.8),
+):
+    """灰度多尺度匹配；search_region 为归一化的 (左, 上, 右, 下) 区域。"""
     if not os.path.exists(template_path):
         return None, 0.0, 1.0
 
@@ -24,9 +30,9 @@ def match_template_multiscale(screen_bgr, template_path, threshold, scales):
     screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
     screen_h, screen_w = screen_gray.shape[:2]
 
-    # 目标弹窗和按钮位于窗口中央，只在中央区域搜索，避开边缘普通 UI。
-    left, top = int(screen_w * 0.2), int(screen_h * 0.2)
-    right, bottom = int(screen_w * 0.8), int(screen_h * 0.8)
+    left_ratio, top_ratio, right_ratio, bottom_ratio = search_region
+    left, top = int(screen_w * left_ratio), int(screen_h * top_ratio)
+    right, bottom = int(screen_w * right_ratio), int(screen_h * bottom_ratio)
     search_area = screen_gray[top:bottom, left:right]
     area_h, area_w = search_area.shape[:2]
 

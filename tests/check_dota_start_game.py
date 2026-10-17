@@ -8,5 +8,6 @@ if __name__ == "__main__":
             "start_game.png",
             is_dota=True,
             default_threshold=DOTA_START_GAME_MATCH_THRESHOLD,
+            search_region=(0.0, 0.0, 1.0, 1.0),
         )
     )
