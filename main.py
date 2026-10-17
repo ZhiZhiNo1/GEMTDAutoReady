@@ -495,7 +495,6 @@ def restart_dota_via_steam(stop_event):
 def monitor_dota_updates(stop_event):
     """独立监控 Dota 更新弹窗；Steam 重启等待不会阻塞小黑盒轮询。"""
     last_window_size_info = None
-    last_logged_match_score = None
     while not stop_event.is_set():
         try:
             dota_win = find_dota_window()
@@ -529,14 +528,6 @@ def monitor_dota_updates(stop_event):
                     DOTA_UPDATE_MATCH_THRESHOLD,
                     DOTA_UPDATE_FALLBACK_SCALES,
                 )
-                # 常规轮询每 4 秒执行一次；分数基本不变时不重复刷控制台和日志。
-                # 首次记录一次，之后仅在分数变化达到 0.05 时更新诊断信息。
-                if (
-                    last_logged_match_score is None
-                    or abs(score - last_logged_match_score) >= 0.05
-                ):
-                    logger.debug("Dota 更新弹窗匹配分数 %.3f，模板缩放 %.2f", score, scale)
-                    last_logged_match_score = score
                 if center:
                     logger.warning(
                         "🚨 识别到 Dota [需要更新]弹窗（匹配度 %.2f，模板缩放 %.2f），通过 Steam 重启游戏...",
