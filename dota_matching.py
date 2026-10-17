@@ -7,9 +7,13 @@ import cv2
 
 DOTA_UPDATE_MATCH_THRESHOLD = 0.76
 DOTA_START_GAME_MATCH_THRESHOLD = 0.80
+DOTA_START_CANCEL_MATCH_THRESHOLD = 0.80
+DOTA_STARTING_MATCH_THRESHOLD = 0.85
 DOTA_UPDATE_FALLBACK_TRIGGER = 0.5
 DOTA_TEMPLATE_REFERENCE_WIDTH = 1920
 DOTA_UPDATE_FALLBACK_SCALES = (0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.45, 1.6, 1.8)
+DOTA_START_CANCEL_SEARCH_REGION = (0.5, 0.5, 1.0, 1.0)
+DOTA_STARTING_SEARCH_REGION = (0.65, 0.65, 1.0, 0.9)
 
 
 def match_template_multiscale(
@@ -18,8 +22,12 @@ def match_template_multiscale(
     threshold,
     scales,
     search_region=(0.2, 0.2, 0.8, 0.8),
+    force_fallback=False,
 ):
-    """灰度多尺度匹配；search_region 为归一化的 (左, 上, 右, 下) 区域。"""
+    """灰度多尺度匹配；search_region 为归一化的 (左, 上, 右, 下) 区域。
+
+    force_fallback=True 时，在首选比例未达阈值后继续尝试完整候选比例集合。
+    """
     if not os.path.exists(template_path):
         return None, 0.0, 1.0
 
@@ -69,9 +77,11 @@ def match_template_multiscale(
                     top + location[1] + height // 2,
                 )
 
-    # 常规轮询只搜索窗口宽度对应的比例附近；只有出现较强疑似匹配时才宽范围兜底。
+    # 常规识别只搜索窗口宽度对应的比例附近；特殊状态可要求未命中时做全范围兜底。
     search_scales(preferred_scales)
-    if DOTA_UPDATE_FALLBACK_TRIGGER <= best_score < threshold:
+    if best_score >= threshold:
+        return best_center, best_score, best_scale
+    if force_fallback or best_score >= DOTA_UPDATE_FALLBACK_TRIGGER:
         search_scales(scale for scale in scales if scale not in preferred_scales)
 
     if best_score >= threshold:

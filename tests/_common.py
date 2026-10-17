@@ -12,7 +12,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dota_matching import (  # noqa: E402
+    DOTA_START_CANCEL_MATCH_THRESHOLD,
+    DOTA_START_CANCEL_SEARCH_REGION,
     DOTA_START_GAME_MATCH_THRESHOLD,
+    DOTA_STARTING_MATCH_THRESHOLD,
+    DOTA_STARTING_SEARCH_REGION,
     DOTA_UPDATE_FALLBACK_SCALES,
     DOTA_UPDATE_MATCH_THRESHOLD,
     match_template_multiscale,
@@ -42,6 +46,7 @@ def run_check(
     is_dota=False,
     default_threshold=None,
     search_region=None,
+    force_fallback=False,
 ):
     parser = argparse.ArgumentParser(
         description=f"Check a screenshot for {recognition_name}."
@@ -91,6 +96,7 @@ def run_check(
             args.threshold,
             DOTA_UPDATE_FALLBACK_SCALES,
             search_region=search_region or (0.2, 0.2, 0.8, 0.8),
+            force_fallback=force_fallback,
         )
     else:
         center, score = match_template_scaled(

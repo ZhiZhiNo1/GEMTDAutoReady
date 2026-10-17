@@ -20,7 +20,11 @@ import win32process
 import win32con
 import atexit
 from dota_matching import (
+    DOTA_START_CANCEL_MATCH_THRESHOLD,
+    DOTA_START_CANCEL_SEARCH_REGION,
     DOTA_START_GAME_MATCH_THRESHOLD,
+    DOTA_STARTING_MATCH_THRESHOLD,
+    DOTA_STARTING_SEARCH_REGION,
     DOTA_UPDATE_FALLBACK_SCALES,
     DOTA_UPDATE_MATCH_THRESHOLD,
     match_template_multiscale,
@@ -42,6 +46,8 @@ def get_resource_path(relative_path):
 TEMPLATES = {
     "update_popup": get_resource_path("templates/update_popup.png"),
     "dota_start_game": get_resource_path("templates/start_game.png"),
+    "dota_start_cancel": get_resource_path("templates/dota_start_cancel.png"),
+    "dota_starting": get_resource_path("templates/dota_starting.png"),
     "xhb_notification_badge": get_resource_path("templates/xhb_notification_badge.png"),
     "xhb_accept_invite": get_resource_path("templates/xhb_accept_invite.png"),
     "xhb_ready": get_resource_path("templates/xhb_ready.png"),
@@ -52,6 +58,9 @@ TEMPLATES = {
 
 POLL_INTERVAL = 4         # 每 3~5 秒轮询一次
 CLICK_DELAY = 1           # 点击后短暂等待界面刷新，再立即识别下一步
+DOTA_START_RETRY_DELAY = 8
+DOTA_START_RETRY_CONFIRMATIONS = 2
+DOTA_START_RESULT_POLL_INTERVAL = 0.5
 XHB_FLOW_TIMEOUT = 3        # 邀请流程中的每一步最多等待 3 秒
 XHB_ACTIVE_POLL_INTERVAL = 0.5
 DOTA_PROCESS = "dota2.exe"
@@ -625,6 +634,8 @@ def monitor_dota_updates(stop_event):
     """监控 Dota 更新弹窗和游戏内开始按钮；不阻塞小黑盒轮询。"""
     last_window_size_info = None
     start_button_was_visible = False
+    start_attempt_started_at = None
+    no_countdown_observations = 0
     while not stop_event.is_set():
         try:
             dota_win = find_dota_window()
@@ -648,7 +659,9 @@ def monitor_dota_updates(stop_event):
                     find_xiaoheihei_window(),
                     grab_client_window,
                     stop_event,
-                    POLL_INTERVAL,
+                    DOTA_START_RESULT_POLL_INTERVAL
+                    if start_attempt_started_at is not None
+                    else POLL_INTERVAL,
                 )
                 if dota_screen is None:
                     break
@@ -664,6 +677,11 @@ def monitor_dota_updates(stop_event):
                 start_center = None
                 start_score = 0.0
                 start_scale = 1.0
+                cancel_center = None
+                cancel_score = 0.0
+                starting_center = None
+                starting_score = 0.0
+                starting_scale = 1.0
                 if not center:
                     start_center, start_score, start_scale = match_template_multiscale(
                         dota_screen,
@@ -672,10 +690,31 @@ def monitor_dota_updates(stop_event):
                         DOTA_UPDATE_FALLBACK_SCALES,
                         search_region=(0.0, 0.0, 1.0, 1.0),
                     )
+                    if start_attempt_started_at is not None:
+                        starting_center, starting_score, starting_scale = match_template_multiscale(
+                            dota_screen,
+                            TEMPLATES["dota_starting"],
+                            DOTA_STARTING_MATCH_THRESHOLD,
+                            DOTA_UPDATE_FALLBACK_SCALES,
+                            search_region=DOTA_STARTING_SEARCH_REGION,
+                            force_fallback=True,
+                        )
+                        if not starting_center:
+                            cancel_center, cancel_score, _ = match_template_multiscale(
+                                dota_screen,
+                                TEMPLATES["dota_start_cancel"],
+                                DOTA_START_CANCEL_MATCH_THRESHOLD,
+                                DOTA_UPDATE_FALLBACK_SCALES,
+                                search_region=DOTA_START_CANCEL_SEARCH_REGION,
+                                force_fallback=True,
+                            )
 
                 clicked_start_button = False
+                clicked_start_cancel = False
                 if center:
                     start_button_was_visible = False
+                    start_attempt_started_at = None
+                    no_countdown_observations = 0
                 elif start_center and not start_button_was_visible:
                     logger.info(
                         "✅ 识别到 Dota 游戏内[开始游戏]按钮（匹配度 %.2f，模板缩放 %.2f）",
@@ -692,12 +731,54 @@ def monitor_dota_updates(stop_event):
                         overlapping=windows_are_overlapping,
                     )
                     start_button_was_visible = True
+                    start_attempt_started_at = time.monotonic()
+                    no_countdown_observations = 0
                     clicked_start_button = True
                 elif not start_center:
                     start_button_was_visible = False
 
+                if start_attempt_started_at is not None:
+                    if starting_center:
+                        logger.info(
+                            "✅ Dota 已进入开始倒计时（匹配度 %.2f，模板缩放 %.2f），不再重试。",
+                            starting_score,
+                            starting_scale,
+                        )
+                        start_attempt_started_at = None
+                        no_countdown_observations = 0
+                    elif cancel_center:
+                        if time.monotonic() - start_attempt_started_at >= DOTA_START_RETRY_DELAY:
+                            no_countdown_observations += 1
+                            if no_countdown_observations >= DOTA_START_RETRY_CONFIRMATIONS:
+                                logger.warning(
+                                    "Dota 出现取消按钮但未进入倒计时（匹配度 %.2f），"
+                                    "取消本次开始并重新尝试。",
+                                    cancel_score,
+                                )
+                                click_window_on_current_turn(
+                                    dota_win,
+                                    lambda: click_in_client_window(
+                                        dota_win,
+                                        cancel_center[0],
+                                        cancel_center[1],
+                                    ),
+                                    overlapping=windows_are_overlapping,
+                                )
+                                start_attempt_started_at = None
+                                no_countdown_observations = 0
+                                clicked_start_cancel = True
+                        else:
+                            no_countdown_observations = 0
+                    else:
+                        no_countdown_observations = 0
+
                 finish_window_turn(
-                    "dota", 1.5, stop_event, overlapping=windows_are_overlapping
+                    "dota",
+                    DOTA_START_RESULT_POLL_INTERVAL
+                    if start_attempt_started_at is not None
+                    else 1.5,
+                    stop_event,
+                    overlapping=windows_are_overlapping,
                 )
 
                 if center:
@@ -710,10 +791,14 @@ def monitor_dota_updates(stop_event):
                         break
                     if restart_dota_via_steam(stop_event) and stop_event.wait(15):
                         break
-                elif clicked_start_button and stop_event.wait(CLICK_DELAY):
-                    break
+                elif clicked_start_button or clicked_start_cancel:
+                    if stop_event.wait(CLICK_DELAY):
+                        break
+                    continue
             else:
                 start_button_was_visible = False
+                start_attempt_started_at = None
+                no_countdown_observations = 0
                 advance_window_turn_if_needed("dota")
         except WindowLayerAccessDenied:
             advance_window_turn_if_needed("dota")
@@ -721,7 +806,11 @@ def monitor_dota_updates(stop_event):
             advance_window_turn_if_needed("dota")
             logger.exception("Dota 更新监控发生异常，将在下一轮重试。")
 
-        stop_event.wait(POLL_INTERVAL)
+        stop_event.wait(
+            DOTA_START_RESULT_POLL_INTERVAL
+            if start_attempt_started_at is not None
+            else POLL_INTERVAL
+        )
 
 def cleanup():
     logger.info("脚本退出，取消 Dota 和小黑盒的临时置顶...")
@@ -974,6 +1063,12 @@ def main():
                 DOTA_UPDATE_MATCH_THRESHOLD, POLL_INTERVAL, UPDATE_WAIT_MINUTES)
     logger.info("Dota 游戏内[开始游戏]按钮匹配阈值 %.2f",
                 DOTA_START_GAME_MATCH_THRESHOLD)
+    logger.info(
+        "Dota 开始重试：取消按钮阈值 %.2f | 倒计时阈值 %.2f | 等待 %s 秒后确认",
+        DOTA_START_CANCEL_MATCH_THRESHOLD,
+        DOTA_STARTING_MATCH_THRESHOLD,
+        DOTA_START_RETRY_DELAY,
+    )
     logger.info("小黑盒匹配阈值 %.2f | 单步状态等待上限 %s 秒", XHB_MATCH_THRESHOLD, XHB_FLOW_TIMEOUT)
     logger.info("Dota 与小黑盒窗口不重叠时分别置顶；重叠时按轮次交替前置。")
 
