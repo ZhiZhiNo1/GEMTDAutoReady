@@ -1,6 +1,6 @@
 # GEMTDAutoReady
 
-自动处理小黑盒 PC 客户端中的宝石 TD 组队邀请和准备操作，并监控 Dota 2 更新弹窗；检测到更新时会通过 Steam 重启 Dota 2。
+自动处理小黑盒 PC 客户端中的宝石 TD 组队邀请和准备操作，并监控 Dota 2 更新弹窗及游戏内“开始游戏”按钮；检测到更新时会通过 Steam 重启 Dota 2。
 
 Dota 更新监控和小黑盒邀请/准备识别独立运行。接受邀请、点击准备等后续步骤各自最多等待 3 秒；超时会立即恢复常规识别。
 
@@ -27,6 +27,7 @@ python main.py
 
 ```powershell
 python tests/check_dota_update_popup.py "G:\path\to\screenshot.png"
+python tests/check_dota_start_game.py "G:\path\to\screenshot.png"
 python tests/check_xhb_notification_badge.py "G:\path\to\screenshot.png"
 python tests/check_xhb_accept_invite.py "G:\path\to\screenshot.png"
 python tests/check_xhb_ready.py "G:\path\to\screenshot.png"
@@ -35,7 +36,7 @@ python tests/check_xhb_arcade_match.py "G:\path\to\screenshot.png"
 python tests/check_xhb_gem_td.py "G:\path\to\screenshot.png"
 ```
 
-默认阈值与程序一致（Dota 为 `0.76`，小黑盒为 `0.86`）。可用 `--threshold` 临时指定阈值、`--template` 指定模板；小黑盒截图还可用 `--scale` 指定显示缩放比例（默认 `1.0`）。返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
+默认阈值与程序一致（Dota 更新弹窗 `0.76`、Dota 开始按钮 `0.80`、小黑盒 `0.86`）。可用 `--threshold` 临时指定阈值、`--template` 指定模板；小黑盒截图还可用 `--scale` 指定显示缩放比例（默认 `1.0`）。返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
 
 小黑盒如果回到默认页面，脚本会识别并点击“游廊匹配”，随后识别宝石 TD 图标并进入该游戏页面，再恢复邀请和准备状态监控。
 

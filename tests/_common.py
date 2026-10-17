@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dota_matching import (  # noqa: E402
+    DOTA_START_GAME_MATCH_THRESHOLD,
     DOTA_UPDATE_FALLBACK_SCALES,
     DOTA_UPDATE_MATCH_THRESHOLD,
     match_template_multiscale,
@@ -35,7 +36,7 @@ def read_image(path):
     return image
 
 
-def run_check(recognition_name, template_name, is_dota=False):
+def run_check(recognition_name, template_name, is_dota=False, default_threshold=None):
     parser = argparse.ArgumentParser(
         description=f"Check a screenshot for {recognition_name}."
     )
@@ -47,11 +48,12 @@ def run_check(recognition_name, template_name, is_dota=False):
         help=f"Template image (default: templates/{template_name})",
     )
     if is_dota:
+        threshold = default_threshold or DOTA_UPDATE_MATCH_THRESHOLD
         parser.add_argument(
             "--threshold",
             type=float,
-            default=DOTA_UPDATE_MATCH_THRESHOLD,
-            help=f"Match threshold (default: {DOTA_UPDATE_MATCH_THRESHOLD:.2f})",
+            default=threshold,
+            help=f"Match threshold (default: {threshold:.2f})",
         )
     else:
         parser.add_argument(

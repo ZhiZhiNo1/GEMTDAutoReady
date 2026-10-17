@@ -6,13 +6,14 @@ import cv2
 
 
 DOTA_UPDATE_MATCH_THRESHOLD = 0.76
+DOTA_START_GAME_MATCH_THRESHOLD = 0.80
 DOTA_UPDATE_FALLBACK_TRIGGER = 0.5
 DOTA_TEMPLATE_REFERENCE_WIDTH = 1920
 DOTA_UPDATE_FALLBACK_SCALES = (0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.45, 1.6, 1.8)
 
 
 def match_template_multiscale(screen_bgr, template_path, threshold, scales):
-    """灰度多尺度匹配；Dota UI 随游戏分辨率/DPI 缩放时仍可识别。"""
+    """灰度多尺度匹配；适配 Dota 界面随游戏分辨率/DPI 变化的缩放。"""
     if not os.path.exists(template_path):
         return None, 0.0, 1.0
 
@@ -23,7 +24,7 @@ def match_template_multiscale(screen_bgr, template_path, threshold, scales):
     screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
     screen_h, screen_w = screen_gray.shape[:2]
 
-    # 更新弹窗位于窗口中央，只在中央区域搜索，避开页面导航栏等普通“更新”文字。
+    # 目标弹窗和按钮位于窗口中央，只在中央区域搜索，避开边缘普通 UI。
     left, top = int(screen_w * 0.2), int(screen_h * 0.2)
     right, bottom = int(screen_w * 0.8), int(screen_h * 0.8)
     search_area = screen_gray[top:bottom, left:right]

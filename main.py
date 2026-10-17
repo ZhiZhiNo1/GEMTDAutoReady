@@ -20,6 +20,7 @@ import win32process
 import win32con
 import atexit
 from dota_matching import (
+    DOTA_START_GAME_MATCH_THRESHOLD,
     DOTA_UPDATE_FALLBACK_SCALES,
     DOTA_UPDATE_MATCH_THRESHOLD,
     match_template_multiscale,
@@ -40,6 +41,7 @@ def get_resource_path(relative_path):
 # ================= 2. 再定义配置变量 =================
 TEMPLATES = {
     "update_popup": get_resource_path("templates/update_popup.png"),
+    "dota_start_game": get_resource_path("templates/start_game.png"),
     "xhb_notification_badge": get_resource_path("templates/xhb_notification_badge.png"),
     "xhb_accept_invite": get_resource_path("templates/xhb_accept_invite.png"),
     "xhb_ready": get_resource_path("templates/xhb_ready.png"),
@@ -433,6 +435,23 @@ def click_in_window(win, rel_x, rel_y):
     pydirectinput.click()
     logger.info("👉 点击窗口内 (%s, %s) -> 屏幕 (%s, %s)", rel_x, rel_y, screen_x, screen_y)
 
+
+def click_in_client_window(win, rel_x, rel_y):
+    """按客户区截图坐标点击，避开 Dota 普通窗口模式的标题栏和边框偏移。"""
+    screen_x, screen_y = win32gui.ClientToScreen(
+        win.hwnd,
+        (int(rel_x), int(rel_y)),
+    )
+    pydirectinput.moveTo(screen_x, screen_y)
+    pydirectinput.click()
+    logger.info(
+        "👉 点击 Dota 客户区 (%s, %s) -> 屏幕 (%s, %s)",
+        rel_x,
+        rel_y,
+        screen_x,
+        screen_y,
+    )
+
 def is_process_running(process_name):
     """判断进程是否在运行"""
     for p in psutil.process_iter(["name"]):
@@ -493,8 +512,9 @@ def restart_dota_via_steam(stop_event):
 
 
 def monitor_dota_updates(stop_event):
-    """独立监控 Dota 更新弹窗；Steam 重启等待不会阻塞小黑盒轮询。"""
+    """监控 Dota 更新弹窗和游戏内开始按钮；不阻塞小黑盒轮询。"""
     last_window_size_info = None
+    start_button_was_visible = False
     while not stop_event.is_set():
         try:
             dota_win = find_dota_window()
@@ -529,6 +549,7 @@ def monitor_dota_updates(stop_event):
                     DOTA_UPDATE_FALLBACK_SCALES,
                 )
                 if center:
+                    start_button_was_visible = False
                     logger.warning(
                         "🚨 识别到 Dota [需要更新]弹窗（匹配度 %.2f，模板缩放 %.2f），通过 Steam 重启游戏...",
                         score,
@@ -538,6 +559,37 @@ def monitor_dota_updates(stop_event):
                         break
                     if restart_dota_via_steam(stop_event) and stop_event.wait(15):
                         break
+                else:
+                    start_center, start_score, start_scale = match_template_multiscale(
+                        dota_screen,
+                        TEMPLATES["dota_start_game"],
+                        DOTA_START_GAME_MATCH_THRESHOLD,
+                        DOTA_UPDATE_FALLBACK_SCALES,
+                    )
+                    if start_center:
+                        if not start_button_was_visible:
+                            logger.info(
+                                "✅ 识别到 Dota 游戏内[开始游戏]按钮（匹配度 %.2f，模板缩放 %.2f）",
+                                start_score,
+                                start_scale,
+                            )
+                            with WINDOW_OPERATION_LOCK:
+                                set_window_topmost(dota_win, True)
+                                try:
+                                    click_in_client_window(
+                                        dota_win,
+                                        start_center[0],
+                                        start_center[1],
+                                    )
+                                finally:
+                                    set_window_topmost(dota_win, False)
+                            start_button_was_visible = True
+                            if stop_event.wait(CLICK_DELAY):
+                                break
+                    else:
+                        start_button_was_visible = False
+            else:
+                start_button_was_visible = False
         except Exception:
             logger.exception("Dota 更新监控发生异常，将在下一轮重试。")
 
@@ -769,6 +821,8 @@ def main():
     logger.info("提示：请保持小黑盒客户端窗口打开且未最小化；Dota 2 需运行以检测更新弹窗。")
     logger.info("Dota 更新匹配阈值 %.2f | 轮询间隔 %s 秒 | 更新最长等待 %s 分钟",
                 DOTA_UPDATE_MATCH_THRESHOLD, POLL_INTERVAL, UPDATE_WAIT_MINUTES)
+    logger.info("Dota 游戏内[开始游戏]按钮匹配阈值 %.2f",
+                DOTA_START_GAME_MATCH_THRESHOLD)
     logger.info("小黑盒匹配阈值 %.2f | 单步状态等待上限 %s 秒", XHB_MATCH_THRESHOLD, XHB_FLOW_TIMEOUT)
 
     for name, path in TEMPLATES.items():
