@@ -4,6 +4,7 @@ This module reuses the image recognition and state machines from ``main.py``,
 but replaces its window coordination layer with Windows virtual desktops.
 """
 
+import atexit
 import threading
 import time
 import ctypes
@@ -20,6 +21,7 @@ os.chdir(PROJECT_ROOT)
 import pythoncom
 import win32con
 import win32gui
+import win32process
 from pyvda import AppView, VirtualDesktop
 
 import main as automation
@@ -56,32 +58,49 @@ class DesktopCoordinator:
     def __init__(self):
         self._lock = threading.RLock()
         self._home = VirtualDesktop.current()
-        self._desktops = {
-            "dota": self._create_desktop("Dota 2"),
-            "xhb": self._create_desktop("Heybox"),
-        }
+        self._desktops = {}
         self._assigned_hwnds = {}
-
-    @staticmethod
-    def _create_desktop(name):
-        desktop = VirtualDesktop.create()
+        self._original_windows = {}
+        self._closed = False
         try:
-            desktop.rename(name)
-        except (NotImplementedError, OSError):
-            automation.logger.debug("当前 Windows 版本不支持虚拟桌面命名：%s", name)
-        return desktop
+            for app, name in (("dota", "Dota 2"), ("xhb", "Heybox")):
+                desktop = VirtualDesktop.create()
+                # Record ownership before rename or any other fallible operation.
+                self._desktops[app] = desktop
+                try:
+                    desktop.rename(name)
+                except (NotImplementedError, OSError):
+                    automation.logger.debug("不支持虚拟桌面命名：%s", name)
+        except BaseException:
+            self.close()
+            raise
 
     def _find(self, app_name, finder):
+        if self._closed:
+            return None
         matches = finder()
         if not matches:
             return None
 
         window = WindowInfo(matches[0])
         with self._lock:
+            if self._closed:
+                return None
             pythoncom.CoInitialize()
             try:
                 if self._assigned_hwnds.get(app_name) != window.hwnd:
                     view = AppView(hwnd=window.hwnd)
+                    if view.is_app_pinned():
+                        raise RuntimeError("请先取消该应用的‘在所有桌面显示窗口’设置")
+                    identity = win32process.GetWindowThreadProcessId(window.hwnd)
+                    key = (window.hwnd, identity)
+                    if key not in self._original_windows:
+                        self._original_windows[key] = (
+                            view.desktop, view.is_pinned(),
+                            win32gui.GetWindowPlacement(window.hwnd),
+                            bool(win32gui.GetWindowLong(window.hwnd, win32con.GWL_EXSTYLE)
+                                 & win32con.WS_EX_TOPMOST),
+                        )
                     if view.is_pinned():
                         view.unpin()
                     view.move(self._desktops[app_name])
@@ -108,6 +127,8 @@ class DesktopCoordinator:
         raise RuntimeError("窗口尚未分配到受管虚拟桌面")
 
     def _activate(self, window):
+        if self._closed:
+            raise RuntimeError("虚拟桌面协调器已停止")
         app_name = self._app_for_hwnd(window.hwnd)
         desktop = self._desktops[app_name]
         if VirtualDesktop.current().id != desktop.id:
@@ -147,12 +168,46 @@ class DesktopCoordinator:
             self._home.go()
             time.sleep(DESKTOP_SWITCH_DELAY)
 
-    def restore_home(self):
+    def close(self):
+        """Stop accepting work, restore surviving windows, then remove owned empties.
+
+        Failed restorations retain their desktop and can be retried by atexit.
+        HWND + thread/process IDs avoid moving an unrelated reused handle.
+        """
         with self._lock:
+            self._closed = True
+            pythoncom.CoInitialize()
             try:
-                self._return_home()
-            except Exception:
-                automation.logger.exception("恢复启动时的虚拟桌面失败。")
+                for key, (desktop, pinned, placement, topmost) in list(self._original_windows.items()):
+                    hwnd, identity = key
+                    try:
+                        if (win32gui.IsWindow(hwnd) and
+                                win32process.GetWindowThreadProcessId(hwnd) == identity):
+                            view = AppView(hwnd=hwnd)
+                            view.move(desktop)
+                            if pinned:
+                                view.pin()
+                            win32gui.SetWindowPlacement(hwnd, placement)
+                            win32gui.SetWindowPos(
+                                hwnd, win32con.HWND_TOPMOST if topmost else win32con.HWND_NOTOPMOST,
+                                0, 0, 0, 0,
+                                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
+                            )
+                        del self._original_windows[key]
+                    except Exception:
+                        automation.logger.exception("恢复窗口 %s 失败，保留其桌面。", hwnd)
+                try:
+                    self._return_home()
+                except Exception:
+                    automation.logger.exception("恢复启动时的虚拟桌面失败。")
+                # If any restoration failed, leave all owned desktops available.
+                if not self._original_windows:
+                    try:
+                        delete_empty_desktops(self._desktops.values(), fallback=self._home)
+                    except Exception:
+                        automation.logger.exception("清理本次创建的空虚拟桌面失败。")
+            finally:
+                pythoncom.CoUninitialize()
 
 
 def install_virtual_desktop_layer(coordinator):
@@ -205,9 +260,17 @@ def run_monitors(stop_event):
         if not os.path.exists(path):
             automation.logger.warning("模板文件缺失：%s", path)
 
+    errors = []
+
+    def monitor_dota():
+        try:
+            automation.monitor_dota_updates(stop_event)
+        except BaseException as exc:
+            errors.append(exc)
+            stop_event.set()
+
     dota_thread = threading.Thread(
-        target=automation.monitor_dota_updates,
-        args=(stop_event,),
+        target=monitor_dota,
         name="DotaUpdateMonitor",
         daemon=False,
     )
@@ -220,34 +283,36 @@ def run_monitors(stop_event):
         dota_thread.join(timeout=10)
         if dota_thread.is_alive():
             automation.logger.warning("Dota 更新监控线程尚未退出，程序将继续清理窗口。")
-        automation.cleanup()
+    if errors:
+        raise errors[0]
 
 
 def main():
     automation.setup_logging()
-    automation.register_console_close_handler()
     automation.logger.info("虚拟桌面模式启动：Dota 2 与小黑盒将分别独占一个桌面。")
     automation.logger.info("每次操作后自动返回启动桌面；按 Ctrl+F1 可强制结束。")
 
     coordinator = DesktopCoordinator()
-    install_virtual_desktop_layer(coordinator)
     stop_event = threading.Event()
-    hotkey_thread = threading.Thread(
-        target=watch_force_stop,
-        args=(stop_event,),
-        name="ForceStopHotkey",
-        daemon=True,
-    )
-    hotkey_thread.start()
+
+    def shutdown():
+        stop_event.set()
+        coordinator.close()
+
+    atexit.register(shutdown)
     try:
+        automation.register_console_close_handler(shutdown)
+        install_virtual_desktop_layer(coordinator)
+        hotkey_thread = threading.Thread(
+            target=watch_force_stop,
+            args=(stop_event,),
+            name="ForceStopHotkey",
+            daemon=True,
+        )
+        hotkey_thread.start()
         run_monitors(stop_event)
     finally:
-        stop_event.set()
-        coordinator.restore_home()
-        try:
-            delete_empty_desktops()
-        except Exception:
-            automation.logger.exception("清理空虚拟桌面失败。")
+        shutdown()
 
 
 # Keep an unpatched reference so the coordinator can use main.py's foreground logic.

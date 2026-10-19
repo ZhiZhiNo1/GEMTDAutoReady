@@ -1,28 +1,19 @@
-"""Virtual-desktop cleanup helpers."""
+"""Remove only explicitly owned, empty virtual desktops."""
 
 from pyvda import VirtualDesktop, get_virtual_desktops
 
 
-def delete_empty_desktops():
-    """Remove empty virtual desktops while always retaining one desktop."""
-    desktops = get_virtual_desktops()
-    if len(desktops) <= 1:
-        return
+def delete_empty_desktops(owned_desktops=(), *, fallback=None):
+    """Never infer ownership from desktop names, numbers, or emptiness.
 
-    current = VirtualDesktop.current()
-    nonempty = [
-        desktop
-        for desktop in desktops
-        if desktop.apps_by_z_order(include_pinned=False)
-    ]
-    keep = next(
-        (desktop for desktop in nonempty if desktop.id == current.id),
-        nonempty[0] if nonempty else current,
-    )
-
-    for desktop in reversed(desktops):
-        if desktop.id == keep.id:
+    No ownership list means no deletion. Re-resolve IDs because desktop numbers
+    change after removal; skip desktops already removed by the user.
+    """
+    owned_ids = {desktop.id for desktop in owned_desktops}
+    fallback = fallback or VirtualDesktop.current()
+    for desktop in reversed(get_virtual_desktops()):
+        if desktop.id not in owned_ids or desktop.id == fallback.id:
             continue
         if desktop.apps_by_z_order(include_pinned=False):
             continue
-        desktop.remove(fallback=keep)
+        desktop.remove(fallback=fallback)

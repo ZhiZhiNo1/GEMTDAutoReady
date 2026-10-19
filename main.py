@@ -716,7 +716,7 @@ def cleanup():
 _console_close_handler = None
 
 
-def register_console_close_handler():
+def register_console_close_handler(close_callback=None):
     """点击控制台关闭按钮时执行退出清理；Ctrl+C 仍由 Python 正常处理。"""
     global _console_close_handler
     if os.name != "nt":
@@ -728,7 +728,7 @@ def register_console_close_handler():
         # CTRL_CLOSE_EVENT / CTRL_LOGOFF_EVENT / CTRL_SHUTDOWN_EVENT
         if event in (2, 5, 6):
             try:
-                cleanup()
+                (close_callback or cleanup)()
             except Exception:
                 logger.exception("控制台关闭时执行清理失败")
         # 让系统继续执行默认终止流程。
