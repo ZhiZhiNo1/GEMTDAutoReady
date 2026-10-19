@@ -7,3 +7,9 @@ dist/
 *.spec
 .codewhale/
 images/
+
+# Log files
+logs/
+
+# temporary files
+bar.py
