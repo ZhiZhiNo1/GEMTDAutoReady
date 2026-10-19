@@ -57,7 +57,7 @@ python tests/check_xhb_gem_td.py "G:\path\to\screenshot.png"
 在项目根目录运行以下命令：
 
 ```powershell
-pyinstaller -F -c --uac-admin --add-data "templates;templates" main.py
+pyinstaller -F -c --uac-admin --icon "assets\gem-td-icon.ico" --add-data "templates;templates" main.py
 ```
 
-打包结果位于 `dist/main.exe`。启动时 Windows 会请求管理员权限。
+打包结果位于 `dist/main.exe`，并使用 `assets/gem-td-icon.ico` 作为程序图标。启动时 Windows 会请求管理员权限。
