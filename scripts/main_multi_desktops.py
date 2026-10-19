@@ -88,12 +88,13 @@ class DesktopCoordinator:
                 return None
             pythoncom.CoInitialize()
             try:
-                if self._assigned_hwnds.get(app_name) != window.hwnd:
+                identity = win32process.GetWindowThreadProcessId(window.hwnd)
+                key = (window.hwnd, identity)
+                window.identity = identity
+                if self._assigned_hwnds.get(app_name) != key:
                     view = AppView(hwnd=window.hwnd)
                     if view.is_app_pinned():
                         raise RuntimeError("请先取消该应用的‘在所有桌面显示窗口’设置")
-                    identity = win32process.GetWindowThreadProcessId(window.hwnd)
-                    key = (window.hwnd, identity)
                     if key not in self._original_windows:
                         self._original_windows[key] = (
                             view.desktop, view.is_pinned(),
@@ -104,7 +105,7 @@ class DesktopCoordinator:
                     if view.is_pinned():
                         view.unpin()
                     view.move(self._desktops[app_name])
-                    self._assigned_hwnds[app_name] = window.hwnd
+                    self._assigned_hwnds[app_name] = key
                     automation.logger.info(
                         "已将 %s 窗口移动到虚拟桌面 %s。",
                         "Dota 2" if app_name == "dota" else "小黑盒",
@@ -120,16 +121,20 @@ class DesktopCoordinator:
     def find_heybox(self):
         return self._find("xhb", get_heybox_hwnd)
 
-    def _app_for_hwnd(self, hwnd):
-        for app_name, assigned_hwnd in self._assigned_hwnds.items():
-            if assigned_hwnd == hwnd:
+    def _app_for_window(self, window):
+        identity = win32process.GetWindowThreadProcessId(window.hwnd)
+        if identity != window.identity:
+            raise RuntimeError("窗口身份已变化，需要重新查找窗口")
+        key = (window.hwnd, identity)
+        for app_name, assigned_key in self._assigned_hwnds.items():
+            if assigned_key == key:
                 return app_name
         raise RuntimeError("窗口尚未分配到受管虚拟桌面")
 
     def _activate(self, window):
         if self._closed:
             raise RuntimeError("虚拟桌面协调器已停止")
-        app_name = self._app_for_hwnd(window.hwnd)
+        app_name = self._app_for_window(window)
         desktop = self._desktops[app_name]
         if VirtualDesktop.current().id != desktop.id:
             desktop.go()

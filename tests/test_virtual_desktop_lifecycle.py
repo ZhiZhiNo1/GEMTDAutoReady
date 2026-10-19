@@ -206,6 +206,34 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(event.is_set())
         automation.monitor_dota_updates.assert_called_once_with(event)
 
+    def test_restarted_process_reusing_hwnd_is_assigned_and_restored(self):
+        old_window = self.assign()
+        replacement_origin = self.desktop('replacement-origin')
+        self.all.append(replacement_origin)
+        self.process.GetWindowThreadProcessId.return_value = (56, 78)
+        self.view.desktop = replacement_origin
+        new_window = self.assign()  # Same numeric HWND, different process/thread.
+        self.assertEqual(self.view.move.call_count, 2)
+        self.assertEqual(self.coordinator._assigned_hwnds['dota'], (123, (56, 78)))
+        self.assertEqual(len(self.coordinator._original_windows), 2)
+        self.assertEqual(self.coordinator._app_for_window(new_window), 'dota')
+        with self.assertRaisesRegex(RuntimeError, '窗口身份已变化'):
+            self.coordinator._app_for_window(old_window)
+        self.coordinator.close()
+        self.assertEqual(self.view.move.call_args.args, (replacement_origin,))
+
+    def test_identity_change_after_discovery_blocks_capture_and_click(self):
+        window = self.assign()
+        self.process.GetWindowThreadProcessId.return_value = (56, 78)
+        self.ns['time'] = Mock()
+        capture, click = Mock(), Mock()
+        with self.assertRaisesRegex(RuntimeError, '窗口身份已变化'):
+            self.coordinator.capture(window, capture)
+        with self.assertRaisesRegex(RuntimeError, '窗口身份已变化'):
+            self.coordinator.click(window, click)
+        capture.assert_not_called()
+        click.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
