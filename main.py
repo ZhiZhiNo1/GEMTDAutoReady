@@ -11,6 +11,8 @@ from logging.handlers import RotatingFileHandler
 
 import cv2
 import mss
+from mss.exception import ScreenShotError
+from capture_recovery import CaptureRecovery, CaptureUnavailable
 import numpy as np
 import psutil
 import pydirectinput
@@ -76,6 +78,7 @@ LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 logger = logging.getLogger("dota2auto")
+CAPTURE_RECOVERY = CaptureRecovery(logger)
 WINDOW_OPERATION_LOCK = threading.RLock()
 WINDOW_OPERATION_CONDITION = threading.Condition(WINDOW_OPERATION_LOCK)
 NEXT_WINDOW_OPERATION = "dota"
@@ -487,31 +490,40 @@ def find_xiaoheihei_window():
 
     return XiaoheiheiWindow(data)
 
-def grab_window(win):
-    """截取指定窗口画面"""
-    left, top = win.left, win.top
-    width, height = win.width, win.height
+def capture_region(source, win, client=False):
+    context = {"hwnd": win.hwnd, "client": client}
 
-    with mss.MSS() as sct:
-        monitor = {"left": left, "top": top, "width": width, "height": height}
-        img = np.array(sct.grab(monitor))
-        screen = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        return screen
+    def operation():
+        if not win32gui.IsWindow(win.hwnd) or win32gui.IsIconic(win.hwnd):
+            raise ValueError("窗口已关闭或最小化")
+        if client:
+            x, y, right, bottom = win32gui.GetClientRect(win.hwnd)
+            left, top = win32gui.ClientToScreen(win.hwnd, (x, y))
+            width, height = right - x, bottom - y
+        else:
+            left, top, right, bottom = win32gui.GetWindowRect(win.hwnd)
+            width, height = right - left, bottom - top
+            win.left, win.top = left, top
+            win.width, win.height = width, height
+        context.update(left=left, top=top, width=width, height=height)
+        if width <= 0 or height <= 0:
+            raise ValueError("截图区域尺寸无效")
+        with mss.MSS() as sct:
+            img = np.array(sct.grab(dict(left=left, top=top, width=width, height=height)))
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+    return CAPTURE_RECOVERY.capture(
+        source, operation, (ScreenShotError, OSError, ValueError, win32gui.error), context)
+
+
+def grab_window(win):
+    """截图失败时通过统一恢复门暂停监控。"""
+    return capture_region("xhb", win)
 
 
 def grab_client_window(win):
-    """截取 Dota 客户区，排除普通窗口模式的标题栏、边框和阴影。"""
-    client_left, client_top, client_right, client_bottom = win32gui.GetClientRect(win.hwnd)
-    left, top = win32gui.ClientToScreen(win.hwnd, (client_left, client_top))
-    width = client_right - client_left
-    height = client_bottom - client_top
-    if width <= 0 or height <= 0:
-        raise ValueError("Dota 客户区尺寸无效：%s x %s" % (width, height))
-
-    with mss.MSS() as sct:
-        monitor = {"left": left, "top": top, "width": width, "height": height}
-        img = np.array(sct.grab(monitor))
-        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    """截取 Dota 客户区，排除标题栏和边框。"""
+    return capture_region("dota", win, client=True)
 
 
 def get_window_size_info(win):
@@ -541,8 +553,9 @@ def click_in_window(win, rel_x, rel_y):
     screen_x = win.left + rel_x
     screen_y = win.top + rel_y
 
-    pydirectinput.moveTo(screen_x, screen_y)
-    pydirectinput.click()
+    with CAPTURE_RECOVERY.action():
+        pydirectinput.moveTo(screen_x, screen_y)
+        pydirectinput.click()
     logger.info("👉 点击窗口内 (%s, %s) -> 屏幕 (%s, %s)", rel_x, rel_y, screen_x, screen_y)
 
 
@@ -552,8 +565,9 @@ def click_in_client_window(win, rel_x, rel_y):
         win.hwnd,
         (int(rel_x), int(rel_y)),
     )
-    pydirectinput.moveTo(screen_x, screen_y)
-    pydirectinput.click()
+    with CAPTURE_RECOVERY.action():
+        pydirectinput.moveTo(screen_x, screen_y)
+        pydirectinput.click()
     logger.info(
         "👉 点击 Dota 客户区 (%s, %s) -> 屏幕 (%s, %s)",
         rel_x,
@@ -573,9 +587,10 @@ def is_process_running(process_name):
     return False
 
 def close_dota(stop_event):
-    logger.warning("强制关闭 Dota 2...")
-    # /T 表示终止指定的进程和由它启用的子进程
-    subprocess.run(["taskkill", "/IM", DOTA_PROCESS, "/T", "/F"], capture_output=True)
+    with CAPTURE_RECOVERY.action():
+        logger.warning("强制关闭 Dota 2...")
+        # /T 表示终止指定的进程和由它启用的子进程
+        subprocess.run(["taskkill", "/IM", DOTA_PROCESS, "/T", "/F"], capture_output=True)
     return not stop_event.wait(5) # 等系统释放进程资源；退出时可提前中断
 
 def restart_dota_via_steam(stop_event):
@@ -678,7 +693,10 @@ def monitor_dota_updates(stop_event):
                     if restart_dota_via_steam(stop_event) and stop_event.wait(15):
                         break
             else:
+                CAPTURE_RECOVERY.window_missing("dota")
                 advance_window_turn_if_needed("dota")
+        except CaptureUnavailable:
+            advance_window_turn_if_needed("dota")
         except WindowLayerAccessDenied:
             advance_window_turn_if_needed("dota")
         except Exception:
@@ -751,6 +769,7 @@ def monitor_xiaoheihei(stop_event):
         try:
             xhb_win = find_xiaoheihei_window()
             if not xhb_win:
+                CAPTURE_RECOVERY.window_missing("xhb")
                 logger.debug("未找到小黑盒窗口，继续轮询。")
                 advance_window_turn_if_needed("xhb")
                 stop_event.wait(POLL_INTERVAL)
@@ -916,6 +935,11 @@ def monitor_xiaoheihei(stop_event):
                 # 动作后跳过常规轮询等待，尽快识别并处理下一步界面。
                 continue
 
+        except CaptureUnavailable:
+            advance_window_turn_if_needed("xhb")
+            if stop_event.wait(POLL_INTERVAL):
+                break
+            continue
         except WindowLayerAccessDenied:
             advance_window_turn_if_needed("xhb")
         except Exception:
