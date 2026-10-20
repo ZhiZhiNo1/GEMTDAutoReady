@@ -6,6 +6,7 @@ import subprocess
 import logging
 import tempfile
 import threading
+from datetime import datetime
 from ctypes import wintypes
 from logging.handlers import RotatingFileHandler
 
@@ -71,9 +72,10 @@ pydirectinput.PAUSE = 0.05
 pydirectinput.FAILSAFE = True # 鼠标移动到左上角强制停止
 
 # ================= 3. 日志配置 =================
-LOG_FILE_NAME = "dota2auto.log"
-LOG_MAX_BYTES = 2 * 1024 * 1024   # 单个日志文件上限 2MB，超出后自动切分
-LOG_BACKUP_COUNT = 3              # 最多保留 3 个历史日志
+LOG_FILE_PREFIX = "dota2auto"
+LOG_RETENTION_DAYS = 7
+LOG_MAX_BYTES = 2 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
@@ -138,8 +140,44 @@ def pick_log_dir():
     return None
 
 
+def cleanup_old_logs(log_dir, retention_days=LOG_RETENTION_DAYS):
+    """删除日志目录中超过保留期的本程序日志。
+
+    只处理 dota2auto_*.log 及其数字轮转备份，避免误删其他文件。
+    清理失败不影响程序启动。
+    """
+    cutoff = time.time() - retention_days * 24 * 60 * 60
+    deleted_count = 0
+
+    try:
+        with os.scandir(log_dir) as entries:
+            for entry in entries:
+                name = entry.name
+                is_log = name.startswith(f"{LOG_FILE_PREFIX}_") and name.endswith(".log")
+                base_name, separator, backup_number = name.rpartition(".log.")
+                is_rotated_log = (
+                    separator
+                    and base_name.startswith(f"{LOG_FILE_PREFIX}_")
+                    and backup_number.isdigit()
+                )
+                if not (is_log or is_rotated_log):
+                    continue
+                try:
+                    if entry.is_file() and entry.stat().st_mtime < cutoff:
+                        os.remove(entry.path)
+                        deleted_count += 1
+                except OSError as exc:
+                    logger.warning("删除过期日志失败 %s：%s", entry.path, exc)
+    except OSError as exc:
+        logger.warning("扫描日志目录失败 %s：%s", log_dir, exc)
+
+    if deleted_count:
+        logger.info("已清理 %s 个超过 %s 天的日志文件。", deleted_count, retention_days)
+    return deleted_count
+
+
 def setup_logging():
-    """控制台 + 文件双通道日志（重复调用不会叠加 handler）"""
+    """控制台 + 文件双通道日志（每次启动使用独立文件，重复调用不叠加 handler）"""
     global LOG_FILE_PATH
 
     if logger.handlers:
@@ -165,7 +203,10 @@ def setup_logging():
     # ---- 文件 ----
     log_dir = pick_log_dir()
     if log_dir:
-        LOG_FILE_PATH = os.path.join(log_dir, LOG_FILE_NAME)
+        cleanup_old_logs(log_dir)
+        started_at = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        log_file_name = f"{LOG_FILE_PREFIX}_{started_at}_{os.getpid()}.log"
+        LOG_FILE_PATH = os.path.join(log_dir, log_file_name)
         file_handler = RotatingFileHandler(
             LOG_FILE_PATH,
             maxBytes=LOG_MAX_BYTES,
