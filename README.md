@@ -1,8 +1,8 @@
 # GEMTDAutoReady
 
-自动处理小黑盒 PC 客户端中的宝石 TD 组队邀请和准备操作，并监控 Dota 2 更新弹窗及游戏内“开始游戏”按钮；检测到更新时会通过 Steam 重启 Dota 2。
+自动处理小黑盒 PC 客户端中的宝石 TD 组队邀请和准备操作，并监控 Dota 2 更新弹窗；检测到更新时会通过 Steam 重启 Dota 2。
 
-Dota 点击“开始游戏”后会检查倒计时提示。如果持续出现“取消”按钮但没有倒计时，程序会等待并确认后点击“取消”，再尝试开始；倒计时中的“开始中”提示会阻止自动取消。
+当前主程序不自动点击 Dota 游戏内“开始游戏”按钮，不检测开局倒计时，也不执行开局失败后的取消和重试。相关截图识别工具仍保留，但不参与主程序运行流程；虚拟桌面入口 `scripts/main_multi_desktops.py` 复用相同的监控逻辑。
 
 Dota 更新监控和小黑盒邀请/准备识别独立运行。接受邀请、点击准备等后续步骤各自最多等待 3 秒；超时会立即恢复常规识别。
 
@@ -27,13 +27,12 @@ Dota 和小黑盒窗口分开时，程序分别置顶并独立识别；窗口外
 
 ## 检查截图识别
 
-收到用户反馈的截图时，可按要检查的识别项运行对应脚本。每个脚本使用程序实际调用的匹配逻辑，并输出匹配分数、缩放比例和识别位置：
+收到用户反馈的截图时，可按要检查的识别项运行对应脚本。这些工具共用 `dota_matching.py` 或 `xhb_matching.py` 的匹配函数，仅检查输入截图并输出结果，不执行点击或自动化流程。保留工具不代表对应功能当前已启用。
+
+当前自动化流程使用的识别项：
 
 ```powershell
 python tests/check_dota_update_popup.py "G:\path\to\screenshot.png"
-python tests/check_dota_start_game.py "G:\path\to\screenshot.png"
-python tests/check_dota_start_cancel.py "G:\path\to\screenshot.png"
-python tests/check_dota_starting.py "G:\path\to\screenshot.png"
 python tests/check_xhb_notification_badge.py "G:\path\to\screenshot.png"
 python tests/check_xhb_accept_invite.py "G:\path\to\screenshot.png"
 python tests/check_xhb_ready.py "G:\path\to\screenshot.png"
@@ -42,7 +41,19 @@ python tests/check_xhb_arcade_match.py "G:\path\to\screenshot.png"
 python tests/check_xhb_gem_td.py "G:\path\to\screenshot.png"
 ```
 
-默认阈值与程序一致（Dota 更新弹窗 `0.76`、Dota 开始按钮 `0.80`、取消按钮 `0.80`、倒计时提示 `0.85`、小黑盒 `0.86`）。可用 `--threshold` 临时指定阈值、`--template` 指定模板；小黑盒截图还可用 `--scale` 指定显示缩放比例（默认 `1.0`）。返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
+以上工具的默认阈值与当前主程序一致：Dota 更新弹窗 `0.76`，小黑盒各项 `0.86`。
+
+仅供独立测试的历史识别工具（当前主程序未调用）：
+
+```powershell
+python tests/check_dota_start_game.py "G:\path\to\screenshot.png"
+python tests/check_dota_start_cancel.py "G:\path\to\screenshot.png"
+python tests/check_dota_starting.py "G:\path\to\screenshot.png"
+```
+
+这三个工具分别检查 Dota 开始按钮、取消按钮和倒计时提示，默认阈值分别为 `0.80`、`0.80`、`0.85`。这些值是保留工具的默认值，不代表当前主程序启用了对应检测。
+
+所有截图检查工具均可用 `--threshold` 临时指定阈值、`--template` 指定模板；小黑盒截图还可用 `--scale` 指定显示缩放比例（默认 `1.0`）。输出包含匹配分数、缩放比例和识别位置；返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
 
 小黑盒如果回到默认页面，脚本会识别并点击“游廊匹配”，随后识别宝石 TD 图标并进入该游戏页面，再恢复邀请和准备状态监控。
 
