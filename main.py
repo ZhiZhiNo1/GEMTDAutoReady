@@ -6,8 +6,8 @@ import subprocess
 import logging
 import tempfile
 import threading
+from datetime import datetime
 from ctypes import wintypes
-from logging.handlers import RotatingFileHandler
 
 import cv2
 import mss
@@ -69,9 +69,7 @@ pydirectinput.PAUSE = 0.05
 pydirectinput.FAILSAFE = True # 鼠标移动到左上角强制停止
 
 # ================= 3. 日志配置 =================
-LOG_FILE_NAME = "dota2auto.log"
-LOG_MAX_BYTES = 2 * 1024 * 1024   # 单个日志文件上限 2MB，超出后自动切分
-LOG_BACKUP_COUNT = 3              # 最多保留 3 个历史日志
+LOG_FILE_PREFIX = "dota2auto"
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
@@ -136,7 +134,7 @@ def pick_log_dir():
 
 
 def setup_logging():
-    """控制台 + 文件双通道日志（重复调用不会叠加 handler）"""
+    """控制台 + 文件双通道日志（每次启动使用独立文件，重复调用不叠加 handler）"""
     global LOG_FILE_PATH
 
     if logger.handlers:
@@ -162,11 +160,11 @@ def setup_logging():
     # ---- 文件 ----
     log_dir = pick_log_dir()
     if log_dir:
-        LOG_FILE_PATH = os.path.join(log_dir, LOG_FILE_NAME)
-        file_handler = RotatingFileHandler(
+        started_at = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        log_file_name = f"{LOG_FILE_PREFIX}_{started_at}_{os.getpid()}.log"
+        LOG_FILE_PATH = os.path.join(log_dir, log_file_name)
+        file_handler = logging.FileHandler(
             LOG_FILE_PATH,
-            maxBytes=LOG_MAX_BYTES,
-            backupCount=LOG_BACKUP_COUNT,
             encoding="utf-8",
         )
         file_handler.setFormatter(formatter)
