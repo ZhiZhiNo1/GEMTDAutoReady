@@ -73,7 +73,7 @@ Windows 的输入桌面与 Win+Tab 虚拟桌面不同，不能仅凭桌面名称
 在项目根目录运行以下命令：
 
 ```powershell
-pyinstaller -F -c --uac-admin --icon "assets\gem-td-icon.ico" --add-data "templates;templates" main.py
+python -m PyInstaller --noconfirm main.spec
 ```
 
-打包结果位于 `dist/main.exe`，并使用 `assets/gem-td-icon.ico` 作为程序图标。启动时 Windows 会请求管理员权限。
+打包配置自动读取 `main.py` 的 `__version__`，输出 `dist/GEMTDAutoReady-v<版本号>.exe`，例如 `GEMTDAutoReady-v2.1.2.exe`。发布新版本时只需更新版本号，再运行上述命令。程序使用 `assets/gem-td-icon.ico` 作为图标，启动时 Windows 会请求管理员权限。
