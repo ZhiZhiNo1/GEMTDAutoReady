@@ -33,7 +33,7 @@ from xhb_matching import (
     match_template_scaled,
 )
 
-__version__ = "2.1.3-beta.1"
+__version__ = "2.1.2"
 
 # ================= 1. 先定义资源路径函数 =================
 def get_resource_path(relative_path):
@@ -223,27 +223,17 @@ def setup_logging():
 
 
 # ================= 4. 然后才是各个功能函数 =================
-def bring_window_to_front(win, force_raise=True):
+def bring_window_to_front(win):
     """将窗口提到普通窗口层级前方，不抢夺键盘焦点。"""
     global WINDOW_LAYER_ACCESS_WARNING_LOGGED
     if not win:
         return None
 
-    try:
-        foreground_before = win32gui.GetForegroundWindow()
-        was_minimized = win.isMinimized()
-        if was_minimized:
-            win32gui.ShowWindow(win.hwnd, win32con.SW_SHOWNOACTIVATE)
-            time.sleep(0.2)
+    if win.isMinimized():
+        win.restore()
+        time.sleep(0.2)
 
-        # 分开摆放时只需保持置顶；每轮重复调整层级会向客户端发送窗口消息。
-        # 重叠和实际点击时仍需将目标移到置顶层前方，保证截图/点击目标正确。
-        already_topmost = bool(
-            win32gui.GetWindowLong(win.hwnd, win32con.GWL_EXSTYLE)
-            & win32con.WS_EX_TOPMOST
-        )
-        if already_topmost and not force_raise and not was_minimized:
-            return
+    try:
         win32gui.SetWindowPos(
             win.hwnd,
             win32con.HWND_TOPMOST,
@@ -251,16 +241,8 @@ def bring_window_to_front(win, force_raise=True):
             0,
             0,
             0,
-            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE
-            | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
         )
-        foreground_after = win32gui.GetForegroundWindow()
-        if foreground_after != foreground_before:
-            logger.warning(
-                "窗口层级操作期间前台窗口变化：target=%s before=%s after=%s "
-                "force_raise=%s（也可能是用户同时切换窗口）。",
-                win.hwnd, foreground_before, foreground_after, force_raise,
-            )
     except Exception as exc:
         error_code = getattr(exc, "winerror", None)
         if error_code is None and getattr(exc, "args", None):
@@ -334,7 +316,7 @@ def capture_window_on_turn(window_name, win, other_win, grab_func, stop_event, w
         WINDOW_OPERATION_CONDITION.notify_all()
     if stop_event.is_set():
         return None, overlapping
-    bring_window_to_front(win, force_raise=False)
+    bring_window_to_front(win)
     time.sleep(0.2)
     return grab_func(win), overlapping
 
