@@ -44,7 +44,7 @@ def get_resource_path(relative_path):
 
 # ================= 2. 再定义配置变量 =================
 TEMPLATES = {
-    "update_popup": get_resource_path("templates/update_popup.png"),
+    "update_popup": get_resource_path("templates/dota2/1920_1080/update_popup.png"),
     "xhb_notification_badge": get_resource_path("templates/xhb_notification_badge.png"),
     "xhb_accept_invite": get_resource_path("templates/xhb_accept_invite.png"),
     "xhb_ready": get_resource_path("templates/xhb_ready.png"),
@@ -715,6 +715,7 @@ def monitor_dota_updates(stop_event):
                     TEMPLATES["update_popup"],
                     DOTA_UPDATE_MATCH_THRESHOLD,
                     DOTA_UPDATE_FALLBACK_SCALES,
+                    refine_scales=True,
                 )
                 finish_window_turn(
                     "dota",
