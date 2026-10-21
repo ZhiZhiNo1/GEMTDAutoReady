@@ -33,7 +33,7 @@ from xhb_matching import (
     match_template_scaled,
 )
 
-__version__ = "2.1.2"
+__version__ = "2.1.3-beta.1"
 
 # ================= 1. 先定义资源路径函数 =================
 def get_resource_path(relative_path):
