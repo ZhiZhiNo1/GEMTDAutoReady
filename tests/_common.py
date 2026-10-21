@@ -20,6 +20,7 @@ from dota_matching import (  # noqa: E402
     DOTA_UPDATE_FALLBACK_SCALES,
     DOTA_UPDATE_MATCH_THRESHOLD,
     match_template_multiscale,
+    select_dota_template,
 )
 from xhb_matching import (  # noqa: E402
     XHB_MATCH_THRESHOLD,
@@ -47,6 +48,7 @@ def run_check(
     default_threshold=None,
     search_region=None,
     force_fallback=False,
+    refine_scales=False,
 ):
     parser = argparse.ArgumentParser(
         description=f"Check a screenshot for {recognition_name}."
@@ -55,7 +57,7 @@ def run_check(
     parser.add_argument(
         "--template",
         type=Path,
-        default=PROJECT_ROOT / "templates" / template_name,
+        default=PROJECT_ROOT / "templates" / ("dota2/1920_1080" if is_dota else "") / template_name,
         help=f"Template image (default: templates/{template_name})",
     )
     if is_dota:
@@ -86,6 +88,11 @@ def run_check(
     except ValueError as exc:
         parser.error(str(exc))
 
+    if is_dota:
+        height, width = screen.shape[:2]
+        args.template, reference_size = select_dota_template(args.template, width, height)
+        print(f"Template resolution: {reference_size[0]}x{reference_size[1]}")
+
     if not args.template.is_file():
         parser.error(f"Template not found: {args.template}")
 
@@ -97,6 +104,7 @@ def run_check(
             DOTA_UPDATE_FALLBACK_SCALES,
             search_region=search_region or (0.2, 0.2, 0.8, 0.8),
             force_fallback=force_fallback,
+            refine_scales=refine_scales,
         )
     else:
         center, score = match_template_scaled(
