@@ -1,6 +1,8 @@
 """Dota 更新弹窗的图像匹配逻辑，可供运行脚本和截图检查工具共用。"""
 
 import os
+import math
+from pathlib import Path
 
 import cv2
 
@@ -16,6 +18,33 @@ DOTA_START_CANCEL_SEARCH_REGION = (0.5, 0.5, 1.0, 1.0)
 DOTA_STARTING_SEARCH_REGION = (0.65, 0.65, 1.0, 0.9)
 
 
+def select_dota_template(template_path, screen_width, screen_height):
+    """Select per-image resolution resources; explicit external paths stay unchanged."""
+    path = Path(template_path)
+    root = path.parent.parent
+    if root.name != "dota2" or not root.is_dir():
+        return path, (DOTA_TEMPLATE_REFERENCE_WIDTH, 1080)
+    candidates = []
+    for directory in root.iterdir():
+        try:
+            width, height = map(int, directory.name.split("_"))
+        except ValueError:
+            continue
+        candidate = directory / path.name
+        if width <= 0 or height <= 0 or not candidate.is_file():
+            continue
+        if (width, height) == (screen_width, screen_height):
+            return candidate, (width, height)
+        aspect_difference = abs(math.log((width / height) / (screen_width / screen_height)))
+        rank = (0 if aspect_difference <= 0.03 else aspect_difference,
+                abs(math.log(width / screen_width)), aspect_difference, directory.name)
+        candidates.append((rank, candidate, (width, height)))
+    if not candidates:
+        return path, (DOTA_TEMPLATE_REFERENCE_WIDTH, 1080)
+    _, candidate, resolution = min(candidates)
+    return candidate, resolution
+
+
 def match_template_multiscale(
     screen_bgr,
     template_path,
@@ -23,15 +52,19 @@ def match_template_multiscale(
     scales,
     search_region=(0.2, 0.2, 0.8, 0.8),
     force_fallback=False,
+    refine_scales=False,
 ):
     """灰度多尺度匹配；search_region 为归一化的 (左, 上, 右, 下) 区域。
 
     force_fallback=True 时，在首选比例未达阈值后继续尝试完整候选比例集合。
     """
+    screen_h, screen_w = screen_bgr.shape[:2]
+    template_path, reference_size = select_dota_template(template_path, screen_w, screen_h)
+    exact_resolution = reference_size == (screen_w, screen_h)
     if not os.path.exists(template_path):
         return None, 0.0, 1.0
 
-    template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+    template = cv2.imread(str(template_path), cv2.IMREAD_GRAYSCALE)
     if template is None:
         return None, 0.0, 1.0
 
@@ -44,14 +77,16 @@ def match_template_multiscale(
     search_area = screen_gray[top:bottom, left:right]
     area_h, area_w = search_area.shape[:2]
 
-    # 模板来自 1920 宽的 16:9 游戏画面。使用客户区宽度估算等比例缩放，
-    # 不让标题栏、边框、阴影或 4:3 画面上下的黑边影响比例。
-    window_scale = screen_w / DOTA_TEMPLATE_REFERENCE_WIDTH
+    # 每张模板独立选择分辨率组；缺少当前分辨率时按所选组宽度缩放。
+    window_scale = screen_w / reference_size[0]
     preferred_scales = sorted({
         round(window_scale * factor, 3)
         for factor in (0.8, 0.9, 1.0, 1.1, 1.2)
         if window_scale * factor >= 0.25
     })
+
+    if exact_resolution:
+        preferred_scales = [1.0]
 
     best_center = None
     best_score = 0.0
@@ -81,9 +116,19 @@ def match_template_multiscale(
     search_scales(preferred_scales)
     if best_score >= threshold:
         return best_center, best_score, best_scale
-    if force_fallback or best_score >= DOTA_UPDATE_FALLBACK_TRIGGER:
-        search_scales(scale for scale in scales if scale not in preferred_scales)
+    if not exact_resolution and (force_fallback or best_score >= DOTA_UPDATE_FALLBACK_TRIGGER):
+        fallback_scales = (round(scale * DOTA_TEMPLATE_REFERENCE_WIDTH / reference_size[0], 3)
+                           for scale in scales)
+        search_scales(scale for scale in fallback_scales if scale not in preferred_scales)
 
+    # Small text templates are sensitive to rounding at fractional window sizes.
+    # Only refine a plausible match, keeping the common no-popup path inexpensive.
+    if not exact_resolution and refine_scales and DOTA_UPDATE_FALLBACK_TRIGGER <= best_score < threshold:
+        search_scales(sorted({
+            round(window_scale * (0.8 + step * 0.01), 3)
+            for step in range(41)
+            if window_scale * (0.8 + step * 0.01) >= 0.25
+        }))
     if best_score >= threshold:
         return best_center, best_score, best_scale
     return None, best_score, best_scale
