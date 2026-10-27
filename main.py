@@ -14,6 +14,7 @@ import cv2
 import mss
 from mss.exception import ScreenShotError
 from capture_recovery import CaptureRecovery, CaptureUnavailable
+from screen_lock import ScreenLockGate
 import numpy as np
 import psutil
 import pydirectinput
@@ -57,6 +58,7 @@ POLL_INTERVAL = 4         # 每 3~5 秒轮询一次
 CLICK_DELAY = 1           # 点击后短暂等待界面刷新，再立即识别下一步
 XHB_FLOW_TIMEOUT = 3        # 邀请流程中的每一步最多等待 3 秒
 XHB_ACTIVE_POLL_INTERVAL = 0.5
+LOCKED_POLL_INTERVAL = 2
 DOTA_PROCESS = "dota2.exe"
 DOTA_STEAM_URL = "steam://rungameid/570"   # Dota2 AppID = 570
 WINDOW_KEYWORD = "Dota 2"
@@ -81,6 +83,7 @@ LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 logger = logging.getLogger("dota2auto")
 CAPTURE_RECOVERY = CaptureRecovery(logger)
+SCREEN_LOCK_GATE = ScreenLockGate(logger, check_interval=LOCKED_POLL_INTERVAL)
 WINDOW_OPERATION_LOCK = threading.RLock()
 WINDOW_OPERATION_CONDITION = threading.Condition(WINDOW_OPERATION_LOCK)
 NEXT_WINDOW_OPERATION = "dota"
@@ -681,6 +684,10 @@ def monitor_dota_updates(stop_event):
     """监控 Dota 更新弹窗；不阻塞小黑盒轮询。"""
     last_window_size_info = None
     while not stop_event.is_set():
+        if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event):
+            last_window_size_info = None
+        if stop_event.is_set():
+            break
         try:
             dota_win = find_dota_window()
             if dota_win:
@@ -725,6 +732,12 @@ def monitor_dota_updates(stop_event):
                 )
 
                 if center:
+                    if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event):
+                        # The UI may have changed while locked; discard the old
+                        # screenshot and recognize it again before taking action.
+                        continue
+                    if stop_event.is_set():
+                        break
                     logger.warning(
                         "🚨 识别到 Dota [需要更新]弹窗（匹配度 %.2f，模板缩放 %.2f），通过 Steam 重启游戏...",
                         score,
@@ -808,6 +821,14 @@ def monitor_xiaoheihei(stop_event):
     last_xhb_dpi_scale = None
 
     while not stop_event.is_set():
+        if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event):
+            # Do not continue a time-sensitive flow using stale coordinates or
+            # a timeout that elapsed while Windows was locked.
+            xhb_flow_state = "monitor_invite"
+            xhb_flow_started = 0
+            last_xhb_dpi_scale = None
+        if stop_event.is_set():
+            break
         try:
             xhb_win = find_xiaoheihei_window()
             if not xhb_win:
@@ -959,6 +980,13 @@ def monitor_xiaoheihei(stop_event):
                     continue
 
             if action_center:
+                if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event):
+                    # The recognized coordinates are stale after a lock/unlock.
+                    xhb_flow_state = "monitor_invite"
+                    xhb_flow_started = 0
+                    continue
+                if stop_event.is_set():
+                    break
                 logger.info("✅ 识别到[%s]，匹配度 %.2f", action_name, action_score)
                 click_window_and_pass_turn(
                     "xhb",
@@ -1003,6 +1031,7 @@ def main():
     logger.info("Dota 更新匹配阈值 %.2f | 轮询间隔 %s 秒 | 更新最长等待 %s 分钟",
                 DOTA_UPDATE_MATCH_THRESHOLD, POLL_INTERVAL, UPDATE_WAIT_MINUTES)
     logger.info("小黑盒匹配阈值 %.2f | 单步状态等待上限 %s 秒", XHB_MATCH_THRESHOLD, XHB_FLOW_TIMEOUT)
+    logger.info("Windows 锁屏时暂停界面操作，每 %s 秒检测一次解锁状态。", LOCKED_POLL_INTERVAL)
     logger.info("Dota 与小黑盒窗口不重叠时分别置顶；重叠时按轮次交替前置。")
 
     for name, path in TEMPLATES.items():
