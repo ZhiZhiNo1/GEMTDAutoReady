@@ -179,9 +179,35 @@ def cleanup_old_logs(log_dir, retention_days=LOG_RETENTION_DAYS):
     return deleted_count
 
 
+def disable_console_quick_edit(kernel32=None):
+    """Keep selecting console text from blocking monitoring/logging threads."""
+    try:
+        if kernel32 is None:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetConsoleMode.restype = wintypes.BOOL
+        kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.SetConsoleMode.restype = wintypes.BOOL
+        handle = kernel32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+        if handle in (None, 0, ctypes.c_void_p(-1).value):
+            return False
+        mode = wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False  # Redirected input or no attached console.
+        # ENABLE_EXTENDED_FLAGS is required to disable ENABLE_QUICK_EDIT_MODE.
+        # Preserve processed input (Ctrl+C) and all other existing mode flags.
+        return bool(kernel32.SetConsoleMode(handle, (mode.value | 0x0080) & ~0x0040))
+    except (AttributeError, OSError):
+        return False
+
+
 def setup_logging():
     """控制台 + 文件双通道日志（每次启动使用独立文件，重复调用不叠加 handler）"""
     global LOG_FILE_PATH
+
+    disable_console_quick_edit()
 
     if logger.handlers:
         return logger
