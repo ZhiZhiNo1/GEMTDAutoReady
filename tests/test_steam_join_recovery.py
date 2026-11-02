@@ -9,7 +9,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from steam_join_recovery import JoinRecovery, recognize, SteamJoinMonitor
+from steam_join_recovery import JoinRecovery, recognize, SteamJoinMonitor, is_game_info_title, renderer_target
 
 
 class SteamJoinTests(unittest.TestCase):
@@ -94,6 +94,35 @@ class SteamClickCommitTests(unittest.TestCase):
         self.run_frame([('error', (2, 3)), ('error', (2, 3))])
         self.click.assert_called_once_with(self.window, 2, 3)
         self.assertEqual(self.monitor.recovery.windows[1]['phase'], 'waiting')
+
+    def test_covered_target_does_not_advance_state(self):
+        self.click.return_value = False
+        self.run_frame([('error', (2, 3)), ('error', (2, 3))])
+        self.assertEqual(self.monitor.recovery.windows, {})
+
+    def test_only_game_info_titles_are_candidates(self):
+        self.assertTrue(is_game_info_title('游戏信息 - hidden'))
+        self.assertTrue(is_game_info_title('Game Info - hidden'))
+        self.assertFalse(is_game_info_title('Steam'))
+        self.assertFalse(is_game_info_title('Friends List'))
+
+    def test_resolves_input_to_renderer_not_parent(self):
+        gui=Mock()
+        gui.WindowFromPoint.return_value=101
+        gui.GetAncestor.return_value=7
+        gui.GetClassName.return_value='Chrome_RenderWidgetHostHWND'
+        gui.ScreenToClient.return_value=(225,658)
+        self.assertEqual(renderer_target(gui,SimpleNamespace(hwnd=7),(3026,970)),(101,(225,658)))
+        gui.ScreenToClient.assert_called_once_with(101,(3026,970))
+
+    def test_another_root_or_parent_window_is_not_input_target(self):
+        gui=Mock()
+        gui.WindowFromPoint.return_value=101
+        gui.GetAncestor.return_value=8
+        self.assertIsNone(renderer_target(gui,SimpleNamespace(hwnd=7),(100,200)))
+        gui.GetAncestor.return_value=7
+        gui.GetClassName.return_value='SDL_app'
+        self.assertIsNone(renderer_target(gui,SimpleNamespace(hwnd=7),(100,200)))
 
     def test_stop_before_click_does_not_advance_state(self):
         self.stop.set()

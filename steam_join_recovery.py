@@ -7,6 +7,21 @@ from xhb_matching import match_template_scaled
 from window_input import bound_client_click
 
 
+def is_game_info_title(title):
+    # Never promote the main Steam browser while recovering the game dialog.
+    return '游戏信息' in title or 'game info' in title.casefold()
+
+
+def renderer_target(gui, window, point):
+    """Resolve actual CEF input HWND, bounded to the verified dialog root."""
+    target = gui.WindowFromPoint(point)
+    if not target or gui.GetAncestor(target, 2) != window.hwnd:
+        return None
+    if gui.GetClassName(target) != 'Chrome_RenderWidgetHostHWND':
+        return None
+    return target, gui.ScreenToClient(target, point)
+
+
 def recognize(screen, templates):
     def find(name):
         threshold = .86 if name in ('close', 'join') else .92
@@ -88,6 +103,8 @@ class SteamJoinMonitor:
             if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
                 return
             try:
+                if not is_game_info_title(win32gui.GetWindowText(hwnd)):
+                    return
                 _, pid = win32process.GetWindowThreadProcessId(hwnd)
                 identity = self.identity.check(psutil.Process(pid))
                 if identity is None:
@@ -122,17 +139,32 @@ class SteamJoinMonitor:
                         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
                     return True
                 def bound_click(win, x, y):
-                    # Global input is only issued while this same trusted HWND owns the point.
                     if not trusted() or stopped.is_set():
-                        raise RuntimeError('Steam window identity changed before click')
+                        return False
                     point = (win.left + x, win.top + y)
-                    target = win32gui.WindowFromPoint(point)
-                    if win32gui.GetAncestor(target, 2) != win.hwnd:
-                        raise RuntimeError('Steam click target is covered or changed')
-                    client_x, client_y = win32gui.ScreenToClient(win.hwnd, point)
-                    if not bound_client_click(win32gui, win, client_x, client_y,
-                                              lambda _: trusted(), stopped):
-                        raise RuntimeError('Steam window input was cancelled')
+                    target = renderer_target(win32gui, win, point)
+                    if target is None:
+                        self.logger.debug('Steam 游戏信息窗口暂被遮挡或渲染子窗口未就绪，跳过本轮。')
+                        return False
+                    child, (client_x, client_y) = target
+                    _, child_pid = win32process.GetWindowThreadProcessId(child)
+                    child_identity = self.identity.check(psutil.Process(child_pid))
+                    if child_identity is None:
+                        return False
+                    def trusted_child(_):
+                        try:
+                            _, pid = win32process.GetWindowThreadProcessId(child)
+                            return (trusted() and win32gui.IsChild(win.hwnd, child)
+                                    and win32gui.GetAncestor(child, 2) == win.hwnd
+                                    and self.identity.check(psutil.Process(pid)) == child_identity)
+                        except (psutil.Error, OSError, win32gui.error):
+                            return False
+                    if not bound_client_click(win32gui, SimpleNamespace(hwnd=child), client_x, client_y,
+                                              trusted_child, stopped):
+                        return False
+                    self.logger.info('Steam 窗口输入已发送：根窗口=%s 子窗口=%s 位置=(%s,%s)',
+                                     win.hwnd, child, client_x, client_y)
+                    return True
                 try:
                     self.process_window(window, capture, bound_click, stopped, prepare)
                 finally:
@@ -154,6 +186,7 @@ class SteamJoinMonitor:
             fresh = recognize(capture(window), self.templates)
             if fresh != (state, center) or stopped.is_set():
                 return
-            click(window, *center)
+            if click(window, *center) is False:
+                return
             self.logger.info('Steam 进房恢复：%s；窗口=%s', action[0], window.hwnd)
         self.recovery = pending
