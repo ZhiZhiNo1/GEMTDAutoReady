@@ -702,7 +702,8 @@ def current_dota_identity(hwnd):
 
 def verify_dota_window(win):
     expected = getattr(win, 'dota_identity', None)
-    return bool(expected and current_dota_identity(win.hwnd) == expected
+    return bool(expected and not SCREEN_LOCK_GATE._check_locked()
+                and current_dota_identity(win.hwnd) == expected
                 and win32gui.IsWindowVisible(win.hwnd))
 
 
@@ -775,7 +776,7 @@ def restart_dota_via_steam(stop_event):
 
 def handle_dota_arcade_update(dota_screen, dota_win, overlapping, state, stop_event):
     """Refresh the Gem TD Arcade page and reinstall its map when Xiaoheihei reports a mismatch."""
-    if stop_event.is_set():
+    if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
         return False
     if state["phase"] == "idle":
         update_center, update_score, update_scale = match_template_multiscale(
@@ -808,7 +809,7 @@ def handle_dota_arcade_update(dota_screen, dota_win, overlapping, state, stop_ev
                     uninstall_scale,
                 )
                 DOTA_ARCADE_UPDATE_REQUESTED.clear()
-                if stop_event.is_set():
+                if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
                     return False
                 click_window_on_current_turn(
                     dota_win,
@@ -871,7 +872,7 @@ def handle_dota_arcade_update(dota_screen, dota_win, overlapping, state, stop_ev
         )
         if center:
             logger.info("刷新 Dota 游廊页面：点击[%s]（匹配度 %.2f）。", action_name, score)
-            if stop_event.is_set():
+            if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
                 return False
             click_window_on_current_turn(
                 dota_win,
@@ -952,7 +953,7 @@ def handle_dota_arcade_update(dota_screen, dota_win, overlapping, state, stop_ev
                 install_score,
                 install_scale,
             )
-            if stop_event.is_set():
+            if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
                 return False
             click_window_on_current_turn(
                 dota_win,
@@ -994,7 +995,7 @@ def handle_dota_arcade_update(dota_screen, dota_win, overlapping, state, stop_ev
             state["absent_update_observations"] = 0
             if (state["install_attempts"] < DOTA_ARCADE_INSTALL_MAX_ATTEMPTS
                     and now - state["last_install_attempt_at"] >= DOTA_ARCADE_INSTALL_RETRY_DELAY):
-                if stop_event.is_set():
+                if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
                     return False
                 click_window_on_current_turn(
                     dota_win, lambda: None if stop_event.is_set() else click_in_client_window(dota_win, *install_center),

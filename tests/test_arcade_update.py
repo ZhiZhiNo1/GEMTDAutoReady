@@ -37,6 +37,7 @@ class ArcadeUpdateTests(unittest.TestCase):
         self.ns.update(
             time=types.SimpleNamespace(monotonic=lambda: self.now),
             logger=Mock(spec=logging.Logger),
+            SCREEN_LOCK_GATE=Mock(wait_until_unlocked=Mock(return_value=False)),
             TEMPLATES={key: key for key in (
                 "dota_arcade_gem_page", "dota_arcade_update", "dota_arcade_uninstall",
                 "dota_arcade_install", "dota_arcade_tab", "dota_arcade_library", "dota_arcade_gem_card")},
@@ -51,6 +52,30 @@ class ArcadeUpdateTests(unittest.TestCase):
 
     def step(self):
         return self.handle(None, None, False, self.state, self.stop_event)
+
+    def test_lock_during_matching_discards_map_actions(self):
+        for phase in ('idle', 'navigate_arcade', 'uninstall_requested', 'install_requested'):
+            with self.subTest(phase=phase):
+                self.state.update(phase=phase, started_at=0, install_attempts=1, last_install_attempt_at=0)
+                gate = self.ns['SCREEN_LOCK_GATE']
+                gate.wait_until_unlocked.side_effect = None
+                gate.wait_until_unlocked.return_value = False
+                def match(*args, **kwargs):
+                    gate.wait_until_unlocked.return_value = True
+                    return (10, 10), 1, 1
+                self.ns['match_template_multiscale'] = match
+                self.now = 10
+                self.step()
+                self.click.assert_not_called()
+                self.assertEqual(self.state['phase'], phase)
+
+    def test_waiting_for_unlock_at_entry_discards_old_frame(self):
+        self.ns['SCREEN_LOCK_GATE'].wait_until_unlocked.return_value = True
+        matcher = Mock()
+        self.ns['match_template_multiscale'] = matcher
+        self.assertFalse(self.step())
+        matcher.assert_not_called()
+        self.click.assert_not_called()
 
     def test_stop_during_matching_prevents_install(self):
         self.state['phase'] = 'uninstall_requested'
