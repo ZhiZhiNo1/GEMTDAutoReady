@@ -47,6 +47,14 @@ class IdentityPrivacyTests(unittest.TestCase):
             bound_client_click(gui,win,30,40,lambda w:False)
         gui.SendMessageTimeout.assert_not_called()
 
+    def test_shared_window_input_never_moves_or_clicks_global_mouse(self):
+        import window_input
+        self.assertNotIn('pydirectinput', vars(window_input))
+        gui = Mock(); gui.GetClientRect.return_value=(0,0,640,480)
+        stop = threading.Event(); stop.set()
+        self.assertFalse(window_input.bound_client_click(gui,SimpleNamespace(hwnd=9),10,20,lambda w:True,stop))
+        gui.SendMessageTimeout.assert_not_called()
+
     def test_identity_change_after_move_never_sends_mouse_down(self):
         gui=Mock();gui.GetClientRect.return_value=(0,0,640,480)
         verify=Mock(side_effect=[True,False])

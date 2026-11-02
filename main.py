@@ -1239,7 +1239,7 @@ def poll_steam_join_recovery(stop_event):
         STEAM_JOIN_MONITOR = SteamJoinMonitor(get_resource_path('templates/steam_join'), logger)
     try:
         STEAM_JOIN_MONITOR.poll(
-            lambda win: capture_region('steam_join', win), click_in_window,
+            lambda win: capture_region('steam_join', win),
             WINDOW_OPERATION_LOCK, stop_event,
         )
     except CaptureUnavailable:

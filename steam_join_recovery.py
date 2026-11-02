@@ -4,6 +4,7 @@ import time
 from copy import deepcopy
 
 from xhb_matching import match_template_scaled
+from window_input import bound_client_click
 
 
 def recognize(screen, templates):
@@ -56,7 +57,7 @@ class SteamJoinMonitor:
         self.next_poll = 0
         self.identity = None
 
-    def poll(self, capture, click, lock, stopped):
+    def poll(self, capture, lock, stopped):
         # Imports stay here so recognition/sequence tests do not touch desktop APIs.
         import psutil
         import win32gui
@@ -128,7 +129,10 @@ class SteamJoinMonitor:
                     target = win32gui.WindowFromPoint(point)
                     if win32gui.GetAncestor(target, 2) != win.hwnd:
                         raise RuntimeError('Steam click target is covered or changed')
-                    click(win, x, y)
+                    client_x, client_y = win32gui.ScreenToClient(win.hwnd, point)
+                    if not bound_client_click(win32gui, win, client_x, client_y,
+                                              lambda _: trusted(), stopped):
+                        raise RuntimeError('Steam window input was cancelled')
                 try:
                     self.process_window(window, capture, bound_click, stopped, prepare)
                 finally:
