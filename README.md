@@ -1,10 +1,12 @@
 # GEMTDAutoReady
 
-自动处理小黑盒 PC 客户端中的宝石 TD 组队邀请和准备操作，并监控 Dota 2 更新弹窗；检测到更新时会通过 Steam 重启 Dota 2。
+自动处理小黑盒 PC 客户端中的宝石 TD 组队邀请和准备操作，并监控 Dota 2 更新弹窗和宝石 TD 地图更新。
 
 当前主程序不自动点击 Dota 游戏内“开始游戏”按钮，不检测开局倒计时，也不执行开局失败后的取消和重试。相关截图识别工具仍保留，但不参与主程序运行流程；虚拟桌面入口 `scripts/main_multi_desktops.py` 复用相同的监控逻辑。
 
 Dota 更新监控和小黑盒邀请/准备识别独立运行。接受邀请、点击准备等后续步骤各自最多等待 3 秒；超时会立即恢复常规识别。
+
+Dota 出现需要更新的系统弹窗时，仍按原流程通过 Steam 重启 Dota 2。小黑盒提示宝石 TD 地图版本落后时，程序会在 Dota 中依次打开“游廊 → 游戏库 → 宝石 TD”，刷新地图状态；出现“更新”按钮后不会点击它，而是先点“卸载”，待页面出现“安装”后再点击安装。若导航过程中 Dota 界面暂时不可识别，会继续等待对应页面；卸载后 60 秒仍未出现“安装”时会暂停并提示检查页面（例如是否需要确认卸载）。刷新后连续 3 次确认宝石 TD 页面已安装且无需更新，会恢复常规监控；刷新等待 60 秒仍无法确认状态时也会退出本次刷新。安装按钮点击后若仍停留在宝石 TD 安装页面，至少间隔 8 秒重试，合计最多点击 3 次；安装等待 180 秒仍未完成时暂停并提示手动检查，手动完成后可自动恢复监控。
 
 Dota 更新弹窗使用中央区域的灰度多尺度模板匹配，截图只取 Dota 客户区以排除标题栏、边框和阴影；优先按 1920 模板宽度和客户区宽度估算缩放（忽略 4:3 窗口上下的 16:9 黑边）。只有出现较强疑似匹配时才做宽范围兜底搜索，避免无弹窗时反复扫描所有比例。
 
@@ -33,33 +35,33 @@ Windows 锁屏时暂停监控通道的截图、窗口切换和点击，每 2 秒
 
 ## 检查截图识别
 
+Steam 显示“服务器指定的 app id 无效”时，测试版会先关闭该错误框，再识别同一游戏信息窗口中的 Dota 2、`gemtd_coop` 地图及“加入游戏”按钮并点击。不会对普通游戏信息窗口直接点击加入。等待错误关闭最多 10 秒，每轮间隔至少 30 秒；每个持续存在的窗口最多尝试 3 轮。只处理 Steam 进程所属可见窗口，安全桌面上不操作。Steam 窗口会在截图期间临时前置，随后恢复原有置顶状态。只接受已注册安装目录内、签名有效且签名主体为 Valve 的 Steam 程序；辅助进程还需属于有效 Steam 进程树。未注册安装目录或无法验证签名时跳过自动操作，点击前确认实际命中同一窗口。此流程已通过截图和模拟状态测试，真实进房结果仍待验证。
+
 收到用户反馈的截图时，可按要检查的识别项运行对应脚本。这些工具共用 `dota_matching.py` 或 `xhb_matching.py` 的匹配函数，仅检查输入截图并输出结果，不执行点击或自动化流程。保留工具不代表对应功能当前已启用。
 
 当前自动化流程使用的识别项：
 
 ```powershell
 python tests/check_dota_update_popup.py "G:\path\to\screenshot.png"
+python tests/check_dota_arcade_update.py "G:\path\to\screenshot.png"
+python tests/check_dota_arcade_uninstall.py "G:\path\to\screenshot.png"
+python tests/check_dota_arcade_install.py "G:\path\to\screenshot.png"
+python tests/check_dota_arcade_gem_page.py "G:\path\to\screenshot.png"
+python tests/check_dota_arcade_tab.py "G:\path\to\screenshot.png"
+python tests/check_dota_arcade_library.py "G:\path\to\screenshot.png"
+python tests/check_dota_arcade_gem_card.py "G:\path\to\screenshot.png"
 python tests/check_xhb_notification_badge.py "G:\path\to\screenshot.png"
 python tests/check_xhb_accept_invite.py "G:\path\to\screenshot.png"
 python tests/check_xhb_ready.py "G:\path\to\screenshot.png"
 python tests/check_xhb_cancel_ready.py "G:\path\to\screenshot.png"
 python tests/check_xhb_arcade_match.py "G:\path\to\screenshot.png"
 python tests/check_xhb_gem_td.py "G:\path\to\screenshot.png"
+python tests/check_xhb_version_mismatch.py "G:\path\to\screenshot.png"
 ```
 
-以上工具的默认阈值与当前主程序一致：Dota 更新弹窗 `0.76`，小黑盒各项 `0.86`。
+默认阈值与程序一致（Dota 更新弹窗 `0.76`、地图更新和导航按钮 `0.84`、小黑盒 `0.86`）。可用 `--threshold` 临时指定阈值、`--template` 指定模板；小黑盒截图还可用 `--scale` 指定显示缩放比例（默认 `1.0`）。返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
 
-仅供独立测试的历史识别工具（当前主程序未调用）：
-
-```powershell
-python tests/check_dota_start_game.py "G:\path\to\screenshot.png"
-python tests/check_dota_start_cancel.py "G:\path\to\screenshot.png"
-python tests/check_dota_starting.py "G:\path\to\screenshot.png"
-```
-
-这三个工具分别检查 Dota 开始按钮、取消按钮和倒计时提示，默认阈值分别为 `0.80`、`0.80`、`0.85`。这些值是保留工具的默认值，不代表当前主程序启用了对应检测。
-
-所有截图检查工具均可用 `--threshold` 临时指定阈值、`--template` 指定模板；小黑盒截图还可用 `--scale` 指定显示缩放比例（默认 `1.0`）。输出包含匹配分数、缩放比例和识别位置；返回 `MATCH` 表示达到阈值，`NO MATCH` 表示未达到。
+游廊标签和“游戏库”路径导航分别保存了选中、未选中的模板；对应检查脚本会同时匹配两种外观。
 
 小黑盒如果回到默认页面，脚本会识别并点击“游廊匹配”，随后识别宝石 TD 图标并进入该游戏页面，再恢复邀请和准备状态监控。
 
@@ -104,3 +106,5 @@ python -m PyInstaller --noconfirm main.spec
 ```
 
 打包配置自动读取 `main.py` 的 `__version__`，输出 `dist/GEMTDAutoReady-v<版本号>.exe`，例如 `GEMTDAutoReady-v2.1.2.exe`。发布新版本时只需更新版本号，再运行上述命令。程序使用 `assets/gem-td-icon.ico` 作为图标，启动时 Windows 会请求管理员权限。
+
+地图操作仅针对 Steam 库中 app 570 清单对应、Valve 签名有效的 Dota 进程，截图与点击之间核对 PID、创建时间和 HWND。新地图操作使用指定窗口的鼠标消息，不发送全局鼠标点击；游戏是否接受此输入方式仍需实机验证。虚拟桌面切换与 Steam 恢复使用同一把协调锁。

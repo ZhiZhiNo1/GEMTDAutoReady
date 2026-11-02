@@ -11,11 +11,38 @@ DOTA_UPDATE_MATCH_THRESHOLD = 0.76
 DOTA_START_GAME_MATCH_THRESHOLD = 0.80
 DOTA_START_CANCEL_MATCH_THRESHOLD = 0.80
 DOTA_STARTING_MATCH_THRESHOLD = 0.85
+DOTA_ARCADE_UPDATE_MATCH_THRESHOLD = 0.84
+DOTA_ARCADE_UNINSTALL_MATCH_THRESHOLD = 0.84
+DOTA_ARCADE_INSTALL_MATCH_THRESHOLD = 0.84
+DOTA_ARCADE_NAV_MATCH_THRESHOLD = 0.84
 DOTA_UPDATE_FALLBACK_TRIGGER = 0.5
 DOTA_TEMPLATE_REFERENCE_WIDTH = 1920
 DOTA_UPDATE_FALLBACK_SCALES = (0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.0, 1.1, 1.2, 1.3, 1.45, 1.6, 1.8)
 DOTA_START_CANCEL_SEARCH_REGION = (0.5, 0.5, 1.0, 1.0)
 DOTA_STARTING_SEARCH_REGION = (0.65, 0.65, 1.0, 0.9)
+# Arcade workshop controls are matched in narrow, normalized client-area regions.
+DOTA_ARCADE_ACTION_SEARCH_REGION = (0.68, 0.75, 0.91, 0.91)
+DOTA_ARCADE_UNINSTALL_SEARCH_REGION = (0.68, 0.30, 0.91, 0.43)
+DOTA_ARCADE_GEM_PAGE_SEARCH_REGION = (0.15, 0.22, 0.50, 0.70)
+DOTA_ARCADE_TAB_SEARCH_REGION = (0.52, 0.00, 0.72, 0.13)
+DOTA_ARCADE_LIBRARY_SEARCH_REGION = (0.20, 0.04, 0.43, 0.17)
+DOTA_ARCADE_GEM_CARD_SEARCH_REGION = (0.25, 0.14, 0.50, 0.43)
+
+
+def arcade_content_region(screen, region):
+    """Translate 16:9 Arcade UI regions into a vertically letterboxed client."""
+    height, width = screen.shape[:2]
+    content_height = round(width * 9 / 16)
+    top = (height - content_height) // 2
+    if top <= 0:
+        return region
+    # Only compensate for actual dark bars, not arbitrary tall game layouts.
+    if screen[:top].max() > 8 or screen[top + content_height:].size == 0:
+        return region
+    if screen[top + content_height:].max() > 8:
+        return region
+    left, upper, right, lower = region
+    return left, (top + upper * content_height) / height, right, (top + lower * content_height) / height
 
 
 def select_dota_template(template_path, screen_width, screen_height):
@@ -71,6 +98,8 @@ def match_template_multiscale(
     screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
     screen_h, screen_w = screen_gray.shape[:2]
 
+    if Path(template_path).name.startswith('dota_arcade_'):
+        search_region = arcade_content_region(screen_bgr, search_region)
     left_ratio, top_ratio, right_ratio, bottom_ratio = search_region
     left, top = int(screen_w * left_ratio), int(screen_h * top_ratio)
     right, bottom = int(screen_w * right_ratio), int(screen_h * bottom_ratio)
@@ -132,3 +161,25 @@ def match_template_multiscale(
     if best_score >= threshold:
         return best_center, best_score, best_scale
     return None, best_score, best_scale
+
+
+def match_any_template_multiscale(
+    screen_bgr,
+    template_paths,
+    threshold,
+    scales,
+    search_region=(0.2, 0.2, 0.8, 0.8),
+):
+    """Match the strongest of several visual states of the same control."""
+    best = (None, 0.0, 1.0)
+    for template_path in template_paths:
+        center, score, scale = match_template_multiscale(
+            screen_bgr,
+            template_path,
+            threshold,
+            scales,
+            search_region=search_region,
+        )
+        if score > best[1]:
+            best = (center, score, scale)
+    return best

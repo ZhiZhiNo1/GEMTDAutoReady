@@ -54,7 +54,7 @@ class DesktopCoordinator:
     """Own the two app desktops and serialize desktop-sensitive operations."""
 
     def __init__(self):
-        self._lock = threading.RLock()
+        self._lock = automation.WINDOW_OPERATION_LOCK
         self._home = VirtualDesktop.current()
         self._desktops = {
             "dota": self._create_desktop("Dota 2"),
@@ -201,9 +201,11 @@ def run_monitors(stop_event):
         "打包运行(onefile)" if automation.is_frozen() else "源码运行",
         automation.get_app_dir(),
     )
-    for path in automation.TEMPLATES.values():
-        if not os.path.exists(path):
-            automation.logger.warning("模板文件缺失：%s", path)
+    for template_paths in automation.TEMPLATES.values():
+        paths = template_paths if isinstance(template_paths, (tuple, list)) else (template_paths,)
+        for path in paths:
+            if not os.path.exists(path):
+                automation.logger.warning("模板文件缺失：%s", path)
 
     dota_thread = threading.Thread(
         target=automation.monitor_dota_updates,

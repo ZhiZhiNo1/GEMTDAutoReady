@@ -9,6 +9,27 @@ XHB_MATCH_THRESHOLD = 0.86
 XHB_MATCH_FALLBACK_SCALES = (1.0, 1.25, 1.5)
 
 
+def match_expired_invite(screen, accept_center, expired_template, reject_template, preferred_scale=1.0):
+    """Only reject an invitation with visible expiry text beside its buttons."""
+    if not accept_center:
+        return None, 0.0
+    expired, expired_score = match_template_scaled(
+        screen, expired_template, preferred_scale=preferred_scale)
+    reject, reject_score = match_template_scaled(
+        screen, reject_template, preferred_scale=preferred_scale)
+    if not expired or not reject:
+        return None, 0.0
+    ax, ay = accept_center
+    rx, ry = reject
+    ex, ey = expired
+    # Relate all three elements to the same invitation row, allowing DPI scaling.
+    spacing = ax - rx
+    if not (40 <= spacing <= 240 and abs(ay - ry) <= spacing * 0.3
+            and 0 < ex - ax <= spacing * 2 and abs(ey - ay) <= spacing * 0.5):
+        return None, 0.0
+    return reject, min(expired_score, reject_score)
+
+
 def match_template_scaled(
     screen_bgr,
     template_path,

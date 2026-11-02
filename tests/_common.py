@@ -12,6 +12,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from dota_matching import (  # noqa: E402
+    DOTA_ARCADE_ACTION_SEARCH_REGION,
+    DOTA_ARCADE_GEM_PAGE_SEARCH_REGION,
+    DOTA_ARCADE_GEM_CARD_SEARCH_REGION,
+    DOTA_ARCADE_INSTALL_MATCH_THRESHOLD,
+    DOTA_ARCADE_LIBRARY_SEARCH_REGION,
+    DOTA_ARCADE_NAV_MATCH_THRESHOLD,
+    DOTA_ARCADE_TAB_SEARCH_REGION,
+    DOTA_ARCADE_UNINSTALL_MATCH_THRESHOLD,
+    DOTA_ARCADE_UNINSTALL_SEARCH_REGION,
+    DOTA_ARCADE_UPDATE_MATCH_THRESHOLD,
     DOTA_START_CANCEL_MATCH_THRESHOLD,
     DOTA_START_CANCEL_SEARCH_REGION,
     DOTA_START_GAME_MATCH_THRESHOLD,
@@ -19,6 +29,7 @@ from dota_matching import (  # noqa: E402
     DOTA_STARTING_SEARCH_REGION,
     DOTA_UPDATE_FALLBACK_SCALES,
     DOTA_UPDATE_MATCH_THRESHOLD,
+    match_any_template_multiscale,
     match_template_multiscale,
     select_dota_template,
 )
@@ -57,7 +68,7 @@ def run_check(
     parser.add_argument(
         "--template",
         type=Path,
-        default=PROJECT_ROOT / "templates" / ("dota2/1920_1080" if is_dota else "") / template_name,
+        default=None,
         help=f"Template image (default: templates/{template_name})",
     )
     if is_dota:
@@ -88,28 +99,42 @@ def run_check(
     except ValueError as exc:
         parser.error(str(exc))
 
+    template_names = template_name if isinstance(template_name, (tuple, list)) else (template_name,)
+    template_paths = (
+        [args.template]
+        if args.template is not None
+        else [PROJECT_ROOT / "templates" / ("dota2/1920_1080" if is_dota and (PROJECT_ROOT / "templates/dota2/1920_1080" / name).is_file() else "") / name for name in template_names]
+    )
     if is_dota:
         height, width = screen.shape[:2]
-        args.template, reference_size = select_dota_template(args.template, width, height)
-        print(f"Template resolution: {reference_size[0]}x{reference_size[1]}")
-
-    if not args.template.is_file():
-        parser.error(f"Template not found: {args.template}")
+        template_paths = [select_dota_template(path, width, height)[0] for path in template_paths]
+    missing = [path for path in template_paths if not path.is_file()]
+    if missing:
+        parser.error("Template not found: " + ", ".join(str(path) for path in missing))
 
     if is_dota:
-        center, score, scale = match_template_multiscale(
-            screen,
-            str(args.template),
-            args.threshold,
-            DOTA_UPDATE_FALLBACK_SCALES,
-            search_region=search_region or (0.2, 0.2, 0.8, 0.8),
-            force_fallback=force_fallback,
-            refine_scales=refine_scales,
-        )
+        if len(template_paths) > 1:
+            center, score, scale = match_any_template_multiscale(
+                screen,
+                [str(path) for path in template_paths],
+                args.threshold,
+                DOTA_UPDATE_FALLBACK_SCALES,
+                search_region=search_region or (0.2, 0.2, 0.8, 0.8),
+            )
+        else:
+            center, score, scale = match_template_multiscale(
+                screen,
+                str(template_paths[0]),
+                args.threshold,
+                DOTA_UPDATE_FALLBACK_SCALES,
+                search_region=search_region or (0.2, 0.2, 0.8, 0.8),
+                force_fallback=force_fallback,
+                refine_scales=refine_scales,
+            )
     else:
         center, score = match_template_scaled(
             screen,
-            str(args.template),
+            str(template_paths[0]),
             threshold=args.threshold,
             preferred_scale=args.scale,
         )
@@ -119,7 +144,7 @@ def run_check(
     print(f"Recognition: {recognition_name}")
     print(f"Screenshot:  {args.screenshot}")
     print(f"Image size:  {width}x{height}")
-    print(f"Template:    {args.template}")
+    print(f"Templates:   {', '.join(str(path) for path in template_paths)}")
     print(f"Score:       {score:.3f} (threshold {args.threshold:.2f})")
     print(f"Scale:       {scale:.3f}")
     print(f"Center:      {center if center else 'not detected'}")
