@@ -79,15 +79,24 @@ class CaptureRecovery:
                 self.generation += 1
                 if self.last_log is None or now - self.last_log >= 60:
                     self.last_log = now
+                    state = self.state()
+                    details = getattr(exc, "details", None)
+                    input_desktop = str(state.get("input_desktop", ""))
+                    if (isinstance(details, dict) and details.get("error_code") == 5
+                            and input_desktop.startswith("unavailable:")):
+                        hint = ("系统暂时不允许访问输入桌面，可能正在显示 UAC 授权、锁屏等安全界面；"
+                                "已暂停识别和点击，等待返回普通桌面后自动重试，无需重启程序")
+                    else:
+                        hint = "截图暂不可用，已暂停识别和点击，将自动重试；请检查目标窗口是否关闭或最小化"
                     self.logger.warning(
-                        "截图失败，暂停识别和点击，自动重试；通道=%s 区域=%s 错误=%s details=%s 桌面/会话=%s",
-                        source, context, exc, getattr(exc, "details", None), self.state())
+                        "%s；通道=%s 区域=%s 错误=%s details=%s 桌面/会话=%s",
+                        hint, source, context, exc, details, state)
                 raise CaptureUnavailable(str(exc)) from exc
             self.failed.discard(source)
             if self.failed:
                 raise CaptureUnavailable("等待其他截图通道恢复")
             if self.started is not None:
-                self.logger.info("截图恢复，继续识别和点击；暂停 %.1f 秒；桌面/会话=%s",
+                self.logger.info("截图已恢复，自动继续识别和点击，无需手动处理；暂停 %.1f 秒；桌面/会话=%s",
                                  time.monotonic() - self.started, self.state())
                 self.started = self.last_log = None
             self.local.generation = self.generation

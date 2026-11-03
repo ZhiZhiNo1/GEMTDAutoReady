@@ -14,6 +14,8 @@ import cv2
 import mss
 from mss.exception import ScreenShotError
 from capture_recovery import CaptureRecovery, CaptureUnavailable
+from steam_join_recovery import SteamJoinMonitor
+from dota_identity import DotaIdentity, bound_client_click
 from screen_lock import ScreenLockGate
 import numpy as np
 import psutil
@@ -24,11 +26,23 @@ import win32process
 import win32con
 import atexit
 from dota_matching import (
+    DOTA_ARCADE_ACTION_SEARCH_REGION,
+    DOTA_ARCADE_INSTALL_MATCH_THRESHOLD,
+    DOTA_ARCADE_GEM_CARD_SEARCH_REGION,
+    DOTA_ARCADE_LIBRARY_SEARCH_REGION,
+    DOTA_ARCADE_NAV_MATCH_THRESHOLD,
+    DOTA_ARCADE_GEM_PAGE_SEARCH_REGION,
+    DOTA_ARCADE_TAB_SEARCH_REGION,
+    DOTA_ARCADE_UNINSTALL_MATCH_THRESHOLD,
+    DOTA_ARCADE_UNINSTALL_SEARCH_REGION,
+    DOTA_ARCADE_UPDATE_MATCH_THRESHOLD,
     DOTA_UPDATE_FALLBACK_SCALES,
     DOTA_UPDATE_MATCH_THRESHOLD,
+    match_any_template_multiscale,
     match_template_multiscale,
 )
 from xhb_matching import (
+    match_expired_invite,
     XHB_MATCH_FALLBACK_SCALES,
     XHB_MATCH_THRESHOLD,
     match_template_scaled,
@@ -46,16 +60,39 @@ def get_resource_path(relative_path):
 # ================= 2. 再定义配置变量 =================
 TEMPLATES = {
     "update_popup": get_resource_path("templates/dota2/1920_1080/update_popup.png"),
+    "dota_arcade_update": get_resource_path("templates/dota_arcade_update.png"),
+    "dota_arcade_uninstall": get_resource_path("templates/dota_arcade_uninstall.png"),
+    "dota_arcade_install": get_resource_path("templates/dota_arcade_install.png"),
+    "dota_arcade_gem_page": get_resource_path("templates/dota_arcade_gem_page.png"),
+    "dota_arcade_tab": (
+        get_resource_path("templates/dota_arcade_tab_unselected.png"),
+        get_resource_path("templates/dota_arcade_tab_selected.png"),
+    ),
+    "dota_arcade_library": (
+        get_resource_path("templates/dota_arcade_library_unselected.png"),
+        get_resource_path("templates/dota_arcade_library_selected.png"),
+    ),
+    "dota_arcade_gem_card": get_resource_path("templates/dota_arcade_gem_card.png"),
     "xhb_notification_badge": get_resource_path("templates/xhb_notification_badge.png"),
     "xhb_accept_invite": get_resource_path("templates/xhb_accept_invite.png"),
+    "xhb_invite_expired": get_resource_path("templates/xhb_invite_expired.png"),
+    "xhb_reject_invite": get_resource_path("templates/xhb_reject_invite.png"),
     "xhb_ready": get_resource_path("templates/xhb_ready.png"),
     "xhb_cancel_ready": get_resource_path("templates/xhb_cancel_ready.png"),
     "xhb_arcade_match": get_resource_path("templates/xhb_arcade_match.png"),
     "xhb_gem_td": get_resource_path("templates/xhb_gem_td.png"),
+    "xhb_version_mismatch": get_resource_path("templates/xhb_version_mismatch.png"),
 }
 
 POLL_INTERVAL = 4         # 每 3~5 秒轮询一次
 CLICK_DELAY = 1           # 点击后短暂等待界面刷新，再立即识别下一步
+DOTA_ARCADE_UNINSTALL_TIMEOUT = 60
+DOTA_ARCADE_NAVIGATION_TIMEOUT = 45
+DOTA_ARCADE_INSTALL_TIMEOUT = 180
+DOTA_ARCADE_INSTALL_RETRY_DELAY = 8
+DOTA_ARCADE_INSTALL_MAX_ATTEMPTS = 3
+DOTA_ARCADE_UPDATE_REQUESTED = threading.Event()
+DOTA_ARCADE_UPDATE_ACTIVE = threading.Event()
 XHB_FLOW_TIMEOUT = 3        # 邀请流程中的每一步最多等待 3 秒
 XHB_ACTIVE_POLL_INTERVAL = 0.5
 LOCKED_POLL_INTERVAL = 2
@@ -361,11 +398,12 @@ def capture_window_on_turn(window_name, win, other_win, grab_func, stop_event, w
     with WINDOW_OPERATION_CONDITION:
         WINDOWS_OVERLAP_MODE = False
         WINDOW_OPERATION_CONDITION.notify_all()
-    if stop_event.is_set():
-        return None, overlapping
-    bring_window_to_front(win, force_raise=False)
-    time.sleep(0.2)
-    return grab_func(win), overlapping
+    with WINDOW_OPERATION_CONDITION:
+        if stop_event.is_set():
+            return None, overlapping
+        bring_window_to_front(win, force_raise=False)
+        time.sleep(0.2)
+        return grab_func(win), overlapping
 
 
 def finish_window_turn(window_name, min_front_seconds, stop_event, overlapping=True):
@@ -405,8 +443,9 @@ def click_window_and_pass_turn(window_name, win, click_func, overlapping=True):
     """点击目标窗口并唤醒另一窗口线程，保证鼠标操作不冲突。"""
     global NEXT_WINDOW_OPERATION, WINDOW_TURN_STARTED_AT
     if not overlapping:
-        bring_window_to_front(win)
-        click_func()
+        with WINDOW_OPERATION_CONDITION:
+            bring_window_to_front(win)
+            click_func()
         return
     next_window = "xhb" if window_name == "dota" else "dota"
     with WINDOW_OPERATION_CONDITION:
@@ -422,8 +461,9 @@ def click_window_and_pass_turn(window_name, win, click_func, overlapping=True):
 def click_window_on_current_turn(win, click_func, overlapping=True):
     """在当前持有的窗口轮次内点击，稍后由 finish_window_turn 交接。"""
     if not overlapping:
-        bring_window_to_front(win)
-        click_func()
+        with WINDOW_OPERATION_CONDITION:
+            bring_window_to_front(win)
+            click_func()
         return
     with WINDOW_OPERATION_CONDITION:
         bring_window_to_front(win)
@@ -579,6 +619,8 @@ def find_xiaoheihei_window():
     return XiaoheiheiWindow(data)
 
 def capture_region(source, win, client=False):
+    if source == 'dota':
+        win.dota_identity = current_dota_identity(win.hwnd)
     context = {"hwnd": win.hwnd, "client": client}
 
     def operation():
@@ -647,22 +689,30 @@ def click_in_window(win, rel_x, rel_y):
     logger.info("👉 点击窗口内 (%s, %s) -> 屏幕 (%s, %s)", rel_x, rel_y, screen_x, screen_y)
 
 
+DOTA_IDENTITY = None
+
+
+def current_dota_identity(hwnd):
+    global DOTA_IDENTITY
+    if DOTA_IDENTITY is None:
+        DOTA_IDENTITY = DotaIdentity()
+    _, pid = win32process.GetWindowThreadProcessId(hwnd)
+    return DOTA_IDENTITY.check(psutil.Process(pid))
+
+
+def verify_dota_window(win):
+    expected = getattr(win, 'dota_identity', None)
+    return bool(expected and not SCREEN_LOCK_GATE._check_locked()
+                and current_dota_identity(win.hwnd) == expected
+                and win32gui.IsWindowVisible(win.hwnd))
+
+
 def click_in_client_window(win, rel_x, rel_y):
-    """按客户区截图坐标点击，避开 Dota 普通窗口模式的标题栏和边框偏移。"""
-    screen_x, screen_y = win32gui.ClientToScreen(
-        win.hwnd,
-        (int(rel_x), int(rel_y)),
-    )
     with CAPTURE_RECOVERY.action():
-        pydirectinput.moveTo(screen_x, screen_y)
-        pydirectinput.click()
-    logger.info(
-        "👉 点击 Dota 客户区 (%s, %s) -> 屏幕 (%s, %s)",
-        rel_x,
-        rel_y,
-        screen_x,
-        screen_y,
-    )
+        if not bound_client_click(win32gui, win, rel_x, rel_y, verify_dota_window):
+            raise RuntimeError('Dota map click was cancelled')
+    logger.info('已向验证过的 Dota 窗口发送地图操作：(%s, %s)', rel_x, rel_y)
+
 
 def is_process_running(process_name):
     """判断进程是否在运行"""
@@ -724,9 +774,303 @@ def restart_dota_via_steam(stop_event):
     return None
 
 
+def handle_dota_arcade_update(dota_screen, dota_win, overlapping, state, stop_event):
+    """Refresh the Gem TD Arcade page and reinstall its map when Xiaoheihei reports a mismatch."""
+    if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
+        return False
+    if state["phase"] == "idle":
+        update_center, update_score, update_scale = match_template_multiscale(
+            dota_screen,
+            TEMPLATES["dota_arcade_update"],
+            DOTA_ARCADE_UPDATE_MATCH_THRESHOLD,
+            DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_ACTION_SEARCH_REGION,
+        )
+        if update_center:
+            title_center, _, _ = match_template_multiscale(
+                dota_screen,
+                TEMPLATES["dota_arcade_gem_page"],
+                DOTA_ARCADE_NAV_MATCH_THRESHOLD,
+                DOTA_UPDATE_FALLBACK_SCALES,
+                search_region=DOTA_ARCADE_GEM_PAGE_SEARCH_REGION,
+            )
+            uninstall_center, uninstall_score, uninstall_scale = match_template_multiscale(
+                dota_screen,
+                TEMPLATES["dota_arcade_uninstall"],
+                DOTA_ARCADE_UNINSTALL_MATCH_THRESHOLD,
+                DOTA_UPDATE_FALLBACK_SCALES,
+                search_region=DOTA_ARCADE_UNINSTALL_SEARCH_REGION,
+            )
+            if title_center and uninstall_center:
+                logger.info(
+                    "检测到宝石TD需要更新（更新 %.2f，卸载 %.2f，模板缩放 %.2f），跳过更新按钮并点击卸载。",
+                    update_score,
+                    uninstall_score,
+                    uninstall_scale,
+                )
+                DOTA_ARCADE_UPDATE_REQUESTED.clear()
+                if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
+                    return False
+                click_window_on_current_turn(
+                    dota_win,
+                    lambda: None if stop_event.is_set() else click_in_client_window(dota_win, *uninstall_center),
+                    overlapping=overlapping,
+                )
+                state["phase"] = "uninstall_requested"
+                state["started_at"] = time.monotonic()
+                state["uninstall_missing_warned"] = False
+                return True
+
+        if DOTA_ARCADE_UPDATE_REQUESTED.is_set():
+            DOTA_ARCADE_UPDATE_REQUESTED.clear()
+            state["absent_update_observations"] = 0
+            state["phase"] = "navigate_arcade"
+            state["started_at"] = time.monotonic()
+            state["wait_update_warned"] = False
+            state["nav_timeout_warned"] = False
+            logger.info("小黑盒提示宝石TD地图版本落后，刷新 Dota 游廊中的游戏页面。")
+        else:
+            if not update_center:
+                state["uninstall_missing_warned"] = False
+            return False
+
+    if state["phase"] in ("navigate_arcade", "navigate_library", "select_gem_td"):
+        template_name, threshold, region, next_phase, action_name = {
+            "navigate_arcade": (
+                "dota_arcade_tab",
+                DOTA_ARCADE_NAV_MATCH_THRESHOLD,
+                DOTA_ARCADE_TAB_SEARCH_REGION,
+                "navigate_library",
+                "游廊",
+            ),
+            "navigate_library": (
+                "dota_arcade_library",
+                DOTA_ARCADE_NAV_MATCH_THRESHOLD,
+                DOTA_ARCADE_LIBRARY_SEARCH_REGION,
+                "select_gem_td",
+                "游戏库",
+            ),
+            "select_gem_td": (
+                "dota_arcade_gem_card",
+                DOTA_ARCADE_NAV_MATCH_THRESHOLD,
+                DOTA_ARCADE_GEM_CARD_SEARCH_REGION,
+                "wait_update_state",
+                "宝石TD",
+            ),
+        }[state["phase"]]
+        matcher = (
+            match_any_template_multiscale
+            if isinstance(TEMPLATES[template_name], tuple)
+            else match_template_multiscale
+        )
+        center, score, _ = matcher(
+            dota_screen,
+            TEMPLATES[template_name],
+            threshold,
+            DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=region,
+        )
+        if center:
+            logger.info("刷新 Dota 游廊页面：点击[%s]（匹配度 %.2f）。", action_name, score)
+            if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
+                return False
+            click_window_on_current_turn(
+                dota_win,
+                lambda: None if stop_event.is_set() else click_in_client_window(dota_win, *center),
+                overlapping=overlapping,
+            )
+            state["phase"] = next_phase
+            state["started_at"] = time.monotonic()
+            return True
+
+        if time.monotonic() - state["started_at"] >= DOTA_ARCADE_NAVIGATION_TIMEOUT:
+            if not state["nav_timeout_warned"]:
+                logger.warning(
+                    "Dota 游廊更新页面导航已等待 %s 秒，仍未识别到[%s]；检测到对应界面后会继续。",
+                    DOTA_ARCADE_NAVIGATION_TIMEOUT,
+                    action_name,
+                )
+                state["nav_timeout_warned"] = True
+        return False
+
+    if state["phase"] == "wait_update_state":
+        title_center, _, _ = match_template_multiscale(
+            dota_screen,
+            TEMPLATES["dota_arcade_gem_page"],
+            DOTA_ARCADE_NAV_MATCH_THRESHOLD,
+            DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_GEM_PAGE_SEARCH_REGION,
+        )
+        update_center, update_score, _ = match_template_multiscale(
+            dota_screen,
+            TEMPLATES["dota_arcade_update"],
+            DOTA_ARCADE_UPDATE_MATCH_THRESHOLD,
+            DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_ACTION_SEARCH_REGION,
+        )
+        uninstall_center, _, _ = match_template_multiscale(
+            dota_screen,
+            TEMPLATES["dota_arcade_uninstall"],
+            DOTA_ARCADE_UNINSTALL_MATCH_THRESHOLD,
+            DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_UNINSTALL_SEARCH_REGION,
+        )
+        if title_center and update_center and uninstall_center:
+            logger.info("重新打开宝石TD页面后已出现[更新]（匹配度 %.2f），开始卸载重装流程。", update_score)
+            state["phase"] = "idle"
+            state["uninstall_missing_warned"] = False
+            return False
+        if title_center and uninstall_center and not update_center:
+            state["absent_update_observations"] += 1
+        else:
+            state["absent_update_observations"] = 0
+        if state["absent_update_observations"] >= 3:
+            logger.info("宝石TD页面连续确认无需更新，恢复常规监控。")
+            state["phase"] = "idle"
+            DOTA_ARCADE_UPDATE_ACTIVE.clear()
+        elif time.monotonic() - state["started_at"] >= DOTA_ARCADE_UNINSTALL_TIMEOUT:
+            logger.warning("刷新宝石TD页面后等待超时，结束本次刷新并恢复常规监控。")
+            state["phase"] = "idle"
+            DOTA_ARCADE_UPDATE_ACTIVE.clear()
+        return False
+
+    if state["phase"] == "uninstall_requested":
+        title_center, _, _ = match_template_multiscale(
+            dota_screen, TEMPLATES["dota_arcade_gem_page"],
+            DOTA_ARCADE_NAV_MATCH_THRESHOLD, DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_GEM_PAGE_SEARCH_REGION,
+        )
+        install_center, install_score, install_scale = match_template_multiscale(
+            dota_screen,
+            TEMPLATES["dota_arcade_install"],
+            DOTA_ARCADE_INSTALL_MATCH_THRESHOLD,
+            DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_ACTION_SEARCH_REGION,
+        )
+        if title_center and install_center:
+            logger.info(
+                "宝石TD已卸载（安装按钮匹配度 %.2f，模板缩放 %.2f），点击安装。",
+                install_score,
+                install_scale,
+            )
+            if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
+                return False
+            click_window_on_current_turn(
+                dota_win,
+                lambda: None if stop_event.is_set() else click_in_client_window(dota_win, *install_center),
+                overlapping=overlapping,
+            )
+            state["phase"] = "install_requested"
+            state["started_at"] = time.monotonic()
+            state["last_install_attempt_at"] = state["started_at"]
+            state["install_attempts"] = 1
+            state["absent_update_observations"] = 0
+            return True
+
+        if time.monotonic() - state["started_at"] >= DOTA_ARCADE_UNINSTALL_TIMEOUT:
+            logger.warning(
+                "点击卸载后 %s 秒仍未出现[安装]按钮；已暂停自动操作，请检查 Dota 页面是否需要确认卸载。",
+                DOTA_ARCADE_UNINSTALL_TIMEOUT,
+            )
+            state["phase"] = "manual_intervention"
+        return False
+
+    if state["phase"] == "install_requested":
+        now = time.monotonic()
+        if now - state["started_at"] >= DOTA_ARCADE_INSTALL_TIMEOUT:
+            logger.warning("宝石TD安装等待超时，已暂停自动操作，请检查下载状态或手动完成安装。")
+            state["phase"] = "manual_intervention"
+            return False
+        title_center, _, _ = match_template_multiscale(
+            dota_screen, TEMPLATES["dota_arcade_gem_page"],
+            DOTA_ARCADE_NAV_MATCH_THRESHOLD, DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_GEM_PAGE_SEARCH_REGION,
+        )
+        install_center, _, _ = match_template_multiscale(
+            dota_screen, TEMPLATES["dota_arcade_install"],
+            DOTA_ARCADE_INSTALL_MATCH_THRESHOLD, DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_ACTION_SEARCH_REGION,
+        )
+        if title_center and install_center:
+            state["absent_update_observations"] = 0
+            if (state["install_attempts"] < DOTA_ARCADE_INSTALL_MAX_ATTEMPTS
+                    and now - state["last_install_attempt_at"] >= DOTA_ARCADE_INSTALL_RETRY_DELAY):
+                if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event) or stop_event.is_set():
+                    return False
+                click_window_on_current_turn(
+                    dota_win, lambda: None if stop_event.is_set() else click_in_client_window(dota_win, *install_center),
+                    overlapping=overlapping,
+                )
+                state["install_attempts"] += 1
+                state["last_install_attempt_at"] = now
+                logger.warning("宝石TD仍显示安装按钮，重试安装（第 %s 次）。", state["install_attempts"])
+                return True
+            return False
+        update_center, _, _ = match_template_multiscale(
+            dota_screen,
+            TEMPLATES["dota_arcade_update"],
+            DOTA_ARCADE_UPDATE_MATCH_THRESHOLD,
+            DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_ACTION_SEARCH_REGION,
+        )
+        if update_center:
+            state["absent_update_observations"] = 0
+        else:
+            uninstall_center, _, _ = match_template_multiscale(
+                dota_screen,
+                TEMPLATES["dota_arcade_uninstall"],
+                DOTA_ARCADE_UNINSTALL_MATCH_THRESHOLD,
+                DOTA_UPDATE_FALLBACK_SCALES,
+                search_region=DOTA_ARCADE_UNINSTALL_SEARCH_REGION,
+            )
+            if title_center and uninstall_center:
+                state["absent_update_observations"] += 1
+            else:
+                state["absent_update_observations"] = 0
+            if state["absent_update_observations"] >= 3:
+                logger.info("宝石TD更新状态已消失，恢复更新状态监控。")
+                state["phase"] = "idle"
+                state["absent_update_observations"] = 0
+                DOTA_ARCADE_UPDATE_ACTIVE.clear()
+        return False
+
+    if state["phase"] == "manual_intervention":
+        update_center, _, _ = match_template_multiscale(
+            dota_screen,
+            TEMPLATES["dota_arcade_update"],
+            DOTA_ARCADE_UPDATE_MATCH_THRESHOLD,
+            DOTA_UPDATE_FALLBACK_SCALES,
+            search_region=DOTA_ARCADE_ACTION_SEARCH_REGION,
+        )
+        uninstall_center = None
+        if not update_center:
+            uninstall_center, _, _ = match_template_multiscale(
+                dota_screen,
+                TEMPLATES["dota_arcade_uninstall"],
+                DOTA_ARCADE_UNINSTALL_MATCH_THRESHOLD,
+                DOTA_UPDATE_FALLBACK_SCALES,
+                search_region=DOTA_ARCADE_UNINSTALL_SEARCH_REGION,
+            )
+        if not update_center and uninstall_center:
+            state["phase"] = "idle"
+            state["uninstall_missing_warned"] = False
+            DOTA_ARCADE_UPDATE_ACTIVE.clear()
+        return False
+
+    return False
+
+
 def monitor_dota_updates(stop_event):
-    """监控 Dota 更新弹窗；不阻塞小黑盒轮询。"""
+    """监控 Dota 更新弹窗和宝石 TD 地图更新；不阻塞小黑盒轮询。"""
     last_window_size_info = None
+    arcade_update_state = {
+        "phase": "idle",
+        "started_at": 0.0,
+        "absent_update_observations": 0,
+        "uninstall_missing_warned": False,
+        "nav_timeout_warned": False,
+        "wait_update_warned": False,
+    }
     while not stop_event.is_set():
         if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event):
             last_window_size_info = None
@@ -759,8 +1103,7 @@ def monitor_dota_updates(stop_event):
                 if dota_screen is None:
                     break
 
-                # TODO: 在这里预留 Dota 游戏内更新操作的识别/处理入口；该流程尚未实现。
-                # 当前只保留现有的“需要更新”弹窗检测和 Steam 重启逻辑。
+                # Steam/Dota 客户端更新弹窗仍走原有重启流程；创意工坊地图更新另行处理。
                 center, score, scale = match_template_multiscale(
                     dota_screen,
                     TEMPLATES["update_popup"],
@@ -768,6 +1111,12 @@ def monitor_dota_updates(stop_event):
                     DOTA_UPDATE_FALLBACK_SCALES,
                     refine_scales=True,
                 )
+                clicked_arcade_update_action = False
+                if not center:
+                    clicked_arcade_update_action = handle_dota_arcade_update(
+                        dota_screen, dota_win, windows_are_overlapping, arcade_update_state, stop_event
+                    )
+
                 finish_window_turn(
                     "dota",
                     1.5,
@@ -782,6 +1131,23 @@ def monitor_dota_updates(stop_event):
                         continue
                     if stop_event.is_set():
                         break
+                    arcade_refresh_pending = (
+                        DOTA_ARCADE_UPDATE_ACTIVE.is_set()
+                        or DOTA_ARCADE_UPDATE_REQUESTED.is_set()
+                        or arcade_update_state["phase"] != "idle"
+                    )
+                    if arcade_refresh_pending:
+                        logger.warning(
+                            "检测到 Dota 客户端更新弹窗，优先重启 Dota；地图更新导航将在重启后重新开始。"
+                        )
+                        arcade_update_state["phase"] = "idle"
+                        arcade_update_state["started_at"] = 0.0
+                        arcade_update_state["absent_update_observations"] = 0
+                        arcade_update_state["uninstall_missing_warned"] = False
+                        arcade_update_state["nav_timeout_warned"] = False
+                        arcade_update_state["wait_update_warned"] = False
+                        DOTA_ARCADE_UPDATE_ACTIVE.set()
+                        DOTA_ARCADE_UPDATE_REQUESTED.set()
                     logger.warning(
                         "🚨 识别到 Dota [需要更新]弹窗（匹配度 %.2f，模板缩放 %.2f），通过 Steam 重启游戏...",
                         score,
@@ -791,6 +1157,10 @@ def monitor_dota_updates(stop_event):
                         break
                     if restart_dota_via_steam(stop_event) and stop_event.wait(15):
                         break
+                elif clicked_arcade_update_action:
+                    if stop_event.wait(CLICK_DELAY):
+                        break
+                    continue
             else:
                 CAPTURE_RECOVERY.window_missing("dota")
                 advance_window_turn_if_needed("dota")
@@ -858,11 +1228,37 @@ def register_console_close_handler():
     if not kernel32.SetConsoleCtrlHandler(_console_close_handler, 1):
         logger.warning("注册控制台关闭处理器失败（错误码 %s）", ctypes.get_last_error())
 
+def resume_invite_monitor(invite_center, reject_center, elapsed, timeout):
+    """A replacement invite need not leave an observable empty frame."""
+    return not invite_center or (elapsed >= timeout and not reject_center)
+
+
+def poll_steam_join_recovery(stop_event):
+    global STEAM_JOIN_MONITOR
+    if STEAM_JOIN_MONITOR is None:
+        STEAM_JOIN_MONITOR = SteamJoinMonitor(get_resource_path('templates/steam_join'), logger)
+    try:
+        STEAM_JOIN_MONITOR.poll(
+            lambda win: capture_region('steam_join', win),
+            WINDOW_OPERATION_LOCK, stop_event,
+        )
+    except CaptureUnavailable:
+        pass
+    except Exception:
+        logger.exception('Steam 进房恢复检查失败，下轮重试。')
+    finally:
+        CAPTURE_RECOVERY.window_missing('steam_join')
+
+
+STEAM_JOIN_MONITOR = None
+
+
 def monitor_xiaoheihei(stop_event):
     """独立处理小黑盒邀请和准备状态。"""
     xhb_flow_state = "monitor_invite"
     xhb_flow_started = 0
     last_xhb_dpi_scale = None
+    xhb_version_mismatch_was_visible = False
 
     while not stop_event.is_set():
         if SCREEN_LOCK_GATE.wait_until_unlocked(stop_event):
@@ -874,6 +1270,7 @@ def monitor_xiaoheihei(stop_event):
         if stop_event.is_set():
             break
         try:
+            poll_steam_join_recovery(stop_event)
             xhb_win = find_xiaoheihei_window()
             if not xhb_win:
                 CAPTURE_RECOVERY.window_missing("xhb")
@@ -904,6 +1301,24 @@ def monitor_xiaoheihei(stop_event):
             if xhb_screen is None:
                 break
 
+            version_mismatch_center, version_mismatch_score = match_template_scaled(
+                xhb_screen,
+                TEMPLATES["xhb_version_mismatch"],
+                preferred_scale=xhb_dpi_scale,
+            )
+            if version_mismatch_center:
+                if not xhb_version_mismatch_was_visible:
+                    logger.warning(
+                        "小黑盒提示宝石TD地图版本与服务器不一致（匹配度 %.2f），请求刷新 Dota 游戏库页面。",
+                        version_mismatch_score,
+                    )
+                    if not DOTA_ARCADE_UPDATE_ACTIVE.is_set():
+                        DOTA_ARCADE_UPDATE_REQUESTED.set()
+                        DOTA_ARCADE_UPDATE_ACTIVE.set()
+                xhb_version_mismatch_was_visible = True
+            else:
+                xhb_version_mismatch_was_visible = False
+
             action_center = None
             action_name = None
             action_score = 0.0
@@ -916,12 +1331,15 @@ def monitor_xiaoheihei(stop_event):
             arcade_center, arcade_score = (None, 0.0)
             gem_td_center, gem_td_score = (None, 0.0)
 
-            if xhb_flow_state in ("monitor_invite", "waiting_invite_card"):
+            if xhb_flow_state in ("monitor_invite", "waiting_invite_card", "waiting_team_ready", "waiting_invite_dismissal"):
                 invite_center, invite_score = match_template_scaled(
                     xhb_screen,
                     TEMPLATES["xhb_accept_invite"],
                     preferred_scale=xhb_dpi_scale,
                 )
+            reject_center, reject_score = match_expired_invite(
+                xhb_screen, invite_center, TEMPLATES["xhb_invite_expired"],
+                TEMPLATES["xhb_reject_invite"], preferred_scale=xhb_dpi_scale)
             if xhb_flow_state in ("monitor_invite", "waiting_team_ready"):
                 ready_center, ready_score = match_template_scaled(
                     xhb_screen, TEMPLATES["xhb_ready"], preferred_scale=xhb_dpi_scale
@@ -967,7 +1385,26 @@ def monitor_xiaoheihei(stop_event):
             ready_action = ready_center and (not cancel_center or ready_score > cancel_score)
             now = time.monotonic()
 
-            if xhb_flow_state == "monitor_invite":
+            if (reject_center and not ready_action and not cancel_center
+                    and xhb_flow_state != "waiting_invite_dismissal"):
+                action_center, action_name, action_score = reject_center, "拒绝已过期的小黑盒邀请", reject_score
+                next_flow_state = "waiting_invite_dismissal"
+
+            elif xhb_flow_state == "waiting_invite_dismissal":
+                if resume_invite_monitor(invite_center, reject_center, now - xhb_flow_started, XHB_FLOW_TIMEOUT):
+                    logger.info("拒绝等待结束，重新识别当前邀请。")
+                    xhb_flow_state = "monitor_invite"
+                    continue
+                elif now - xhb_flow_started >= XHB_FLOW_TIMEOUT:
+                    if reject_center:
+                        action_center, action_name, action_score = reject_center, "再次拒绝仍显示的过期邀请", reject_score
+                        next_flow_state = "waiting_invite_dismissal"
+                    else:
+                        logger.info("邀请已无过期提示，结束拒绝等待并重新识别当前邀请。")
+                        xhb_flow_state = "monitor_invite"
+                        continue
+
+            elif xhb_flow_state == "monitor_invite":
                 if invite_center:
                     action_center, action_name, action_score = invite_center, "接受小黑盒组队邀请", invite_score
                     next_flow_state = "waiting_team_ready"
@@ -1078,9 +1515,11 @@ def main():
     logger.info("Windows 锁屏时暂停界面操作，每 %s 秒检测一次解锁状态。", LOCKED_POLL_INTERVAL)
     logger.info("Dota 与小黑盒窗口不重叠时分别置顶；重叠时按轮次交替前置。")
 
-    for name, path in TEMPLATES.items():
-        if not os.path.exists(path):
-            logger.warning("⚠️ 模板文件缺失：%s，请先制作模板图片！", path)
+    for name, template_paths in TEMPLATES.items():
+        paths = template_paths if isinstance(template_paths, (tuple, list)) else (template_paths,)
+        for path in paths:
+            if not os.path.exists(path):
+                logger.warning("⚠️ 模板文件缺失：%s (%s)，请先制作模板图片！", name, path)
 
     stop_event = threading.Event()
     dota_thread = threading.Thread(
