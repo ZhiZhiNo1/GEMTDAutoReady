@@ -32,9 +32,9 @@ def recognize(screen, templates):
         dx, dy = close[0] - error[0], close[1] - error[1]
         if 0 < dy < 200 and abs(dx) < 180:
             return 'error', close
-    header, game, map_name, join = (find(n) for n in ('header', 'dota', 'map', 'join'))
-    if all((header, game, map_name, join)):
-        if header[1] < game[1] < map_name[1] < join[1] and header[0] < join[0] < game[0]:
+    header, game, join = (find(n) for n in ('header', 'dota', 'join'))
+    if all((header, game, join)):
+        if header[1] < game[1] < join[1] and header[0] < join[0] < game[0]:
             return 'join', join
     return None, None
 

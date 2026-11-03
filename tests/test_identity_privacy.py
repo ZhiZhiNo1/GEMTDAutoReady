@@ -17,6 +17,7 @@ class IdentityPrivacyTests(unittest.TestCase):
         regions = {
             'steam_join_error': [(130,15,570,55),(328,172,503,213)],
             'steam_join_info': [(130,15,570,55),(328,172,503,213)],
+            'steam_join_info_other_map': [(130,15,570,55),(328,172,503,213)],
             'xhb_invite_expired': [(12,56,221,81),(12,80,65,106)],
         }
         for name, boxes in regions.items():

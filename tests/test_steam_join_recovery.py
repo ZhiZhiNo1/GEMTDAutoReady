@@ -14,7 +14,7 @@ from steam_join_recovery import JoinRecovery, recognize, SteamJoinMonitor, is_ga
 
 class SteamJoinTests(unittest.TestCase):
     def test_supplied_screenshots(self):
-        for name, expected in [('steam_join_error', 'error'), ('steam_join_info', 'join')]:
+        for name, expected in [('steam_join_error', 'error'), ('steam_join_info', 'join'), ('steam_join_info_other_map', 'join')]:
             image = cv2.imread(str(ROOT / 'tests/fixtures' / (name + '.png')))
             for scale in (1, 1.25, 1.5):
                 with self.subTest(name=name, scale=scale):
@@ -25,14 +25,19 @@ class SteamJoinTests(unittest.TestCase):
                     self.assertAlmostEqual(center[0], point[0] * scale, delta=3)
                     self.assertAlmostEqual(center[1], point[1] * scale, delta=3)
 
-    def test_join_requires_dota_and_map_identity(self):
+    def test_join_requires_dota_identity(self):
         image = cv2.imread(str(ROOT / 'tests/fixtures/steam_join_info.png'))
-        for left, top, right, bottom in ((510, 65, 570, 96), (460, 240, 570, 275)):
+        for left, top, right, bottom in ((510, 65, 570, 96),):
             changed = image.copy()
             changed[top:bottom, left:right] = 0
             if top == 65:
                 changed[110:150, 500:580] = 0  # The name row also says Dota 2.
             self.assertEqual(recognize(changed, ROOT / 'templates/steam_join'), (None, None))
+
+    def test_map_name_is_not_a_join_requirement(self):
+        image = cv2.imread(str(ROOT / 'tests/fixtures/steam_join_info.png'))
+        image[240:275,460:570] = 0
+        self.assertEqual(recognize(image, ROOT / 'templates/steam_join')[0], 'join')
 
     def test_blank_and_unrelated_error_are_ignored(self):
         image = np.zeros((700, 600, 3), dtype=np.uint8)
